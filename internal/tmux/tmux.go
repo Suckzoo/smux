@@ -232,7 +232,7 @@ func ConfigureMouseMode() {
 	// with tmux's default DoubleClick1Pane binding.
 	_ = exec.Command("tmux", "bind-key", "-T", "root", "C-DoubleClick1Pane",
 		"select-pane", "-t", "{mouse}",
-		";", "set-window-option", "synchronize-panes", "off",
+		"\\;", "set-window-option", "synchronize-panes", "off",
 	).Run()
 }
 
