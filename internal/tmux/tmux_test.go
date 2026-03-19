@@ -471,18 +471,6 @@ func TestSetSynchronizePanesSource(t *testing.T) {
 		t.Error(`tmux.go missing "set-window-option" in SetSynchronizePanes`)
 	}
 
-	// GetSynchronizePanes must use show-window-option -v to read state.
-	if !strings.Contains(content, `"show-window-option"`) {
-		t.Error(`tmux.go missing "show-window-option" in GetSynchronizePanes`)
-	}
-
-	// ToggleSynchronizePanes must call both GetSynchronizePanes and SetSynchronizePanes.
-	if !strings.Contains(content, "GetSynchronizePanes") {
-		t.Error("tmux.go missing GetSynchronizePanes call in ToggleSynchronizePanes")
-	}
-	if !strings.Contains(content, "SetSynchronizePanes(windowID, !current)") {
-		t.Error(`tmux.go missing SetSynchronizePanes(windowID, !current) in ToggleSynchronizePanes`)
-	}
 }
 
 // TestSetSynchronizePanesValueEncoding verifies that the "on" and "off" value
@@ -500,20 +488,6 @@ func TestSetSynchronizePanesValueEncoding(t *testing.T) {
 		if !strings.Contains(content, want) {
 			t.Errorf("tmux.go missing %q in SetSynchronizePanes", want)
 		}
-	}
-}
-
-// TestGetSynchronizePanesParsingLogic verifies the parsing logic: the function
-// must compare the trimmed output to the string "on".
-func TestGetSynchronizePanesParsingLogic(t *testing.T) {
-	src, err := os.ReadFile("tmux.go")
-	if err != nil {
-		t.Fatalf("cannot read tmux.go: %v", err)
-	}
-	content := string(src)
-
-	if !strings.Contains(content, `== "on"`) {
-		t.Error(`tmux.go missing == "on" comparison in GetSynchronizePanes`)
 	}
 }
 
@@ -542,14 +516,14 @@ func TestDoubleClickDisablesSyncPanes(t *testing.T) {
 	}
 	content := string(src)
 
-	// DoubleClick1Pane must be bound.
-	if !strings.Contains(content, `"DoubleClick1Pane"`) {
-		t.Error(`tmux.go ConfigureMouseMode missing "DoubleClick1Pane" binding`)
+	// C-DoubleClick1Pane must be bound (Ctrl+double-click avoids default binding collision).
+	if !strings.Contains(content, `"C-DoubleClick1Pane"`) {
+		t.Error(`tmux.go ConfigureMouseMode missing "C-DoubleClick1Pane" binding`)
 	}
 
 	// The binding must disable synchronize-panes.
 	if !strings.Contains(content, `"synchronize-panes", "off"`) {
-		t.Error(`tmux.go DoubleClick1Pane binding must disable synchronize-panes`)
+		t.Error(`tmux.go C-DoubleClick1Pane binding must disable synchronize-panes`)
 	}
 
 	// The pane-focus-in hook must NOT be present (it was removed intentionally).
@@ -925,107 +899,6 @@ func TestCreateSSHWindowIntegration(t *testing.T) {
 	}
 	if !syncEnabled {
 		t.Error("synchronize-panes was not set to 'on' — broadcast mode must be active by default")
-	}
-}
-
-// AC 2 Sub-AC 2 — BreakPane: tmux break-pane command integration
-
-// TestBreakPaneSourceInspection verifies that BreakPane exists in tmux.go and
-// builds the tmux break-pane command correctly: with -t paneID when a pane is
-// specified, and without -t when paneID is empty.
-func TestBreakPaneSourceInspection(t *testing.T) {
-	src, err := os.ReadFile("tmux.go")
-	if err != nil {
-		t.Fatalf("cannot read tmux.go: %v", err)
-	}
-	content := string(src)
-
-	// BreakPane must be defined as an exported function.
-	if !strings.Contains(content, "func BreakPane(") {
-		t.Error(`tmux.go missing exported "func BreakPane(" — must expose BreakPane function`)
-	}
-	// Must invoke the tmux "break-pane" subcommand.
-	if !strings.Contains(content, `"break-pane"`) {
-		t.Error(`tmux.go BreakPane missing "break-pane" subcommand`)
-	}
-	// Must use -t to target a specific pane when one is provided.
-	if !strings.Contains(content, `"-t", paneID`) {
-		t.Error(`tmux.go BreakPane missing "-t", paneID — must target specific pane`)
-	}
-	// Must return an error (not silently swallow failures).
-	if !strings.Contains(content, "cannot break pane") {
-		t.Error(`tmux.go BreakPane missing error message "cannot break pane" — must propagate failures`)
-	}
-}
-
-// TestBreakPaneIntegration uses a fake tmux binary to verify that BreakPane
-// invokes "tmux break-pane -t <paneID>" with the correct pane identifier.
-func TestBreakPaneIntegration(t *testing.T) {
-	tmpDir := t.TempDir()
-	logFile := filepath.Join(tmpDir, "calls.log")
-	counterFile := filepath.Join(tmpDir, "pane.n")
-
-	writeFakeTmux(t, tmpDir, logFile, counterFile)
-	t.Setenv("PATH", tmpDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	if err := BreakPane("%3"); err != nil {
-		t.Fatalf("BreakPane(%q) error = %v; want nil", "%3", err)
-	}
-
-	lines := parseFakeTmuxLog(t, logFile)
-
-	// Must have at least one line for the break-pane call.
-	if len(lines) == 0 {
-		t.Fatal("no tmux calls recorded; expected break-pane invocation")
-	}
-
-	// Exactly one call and it must be "break-pane -t %3".
-	found := false
-	for _, line := range lines {
-		if strings.HasPrefix(line, "break-pane") && strings.Contains(line, "%3") {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Errorf("no 'break-pane ... %%3' call found in log; lines: %v", lines)
-	}
-}
-
-// TestBreakPaneEmptyPaneIDUsesActivePane verifies that passing an empty paneID
-// causes BreakPane to call "tmux break-pane" without a -t flag, which makes
-// tmux operate on the currently active pane.
-func TestBreakPaneEmptyPaneIDUsesActivePane(t *testing.T) {
-	tmpDir := t.TempDir()
-	logFile := filepath.Join(tmpDir, "calls.log")
-	counterFile := filepath.Join(tmpDir, "pane.n")
-
-	writeFakeTmux(t, tmpDir, logFile, counterFile)
-	t.Setenv("PATH", tmpDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	if err := BreakPane(""); err != nil {
-		t.Fatalf("BreakPane(%q) error = %v; want nil", "", err)
-	}
-
-	lines := parseFakeTmuxLog(t, logFile)
-	if len(lines) == 0 {
-		t.Fatal("no tmux calls recorded; expected break-pane invocation")
-	}
-
-	// Should call "break-pane" without "-t".
-	found := false
-	for _, line := range lines {
-		if strings.HasPrefix(line, "break-pane") {
-			found = true
-			// Must NOT contain -t when paneID is empty.
-			if strings.Contains(line, "-t") {
-				t.Errorf("BreakPane(\"\") should not pass -t flag; got line: %q", line)
-			}
-			break
-		}
-	}
-	if !found {
-		t.Errorf("no 'break-pane' call found in log; lines: %v", lines)
 	}
 }
 
@@ -1434,8 +1307,8 @@ func TestBuildSSHCommandPromptAppearsAfterSSHExit(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestDoubleClickBindingStopsBroadcast verifies that ConfigureMouseMode wires
-// DoubleClick1Pane to stop synchronize-panes (broadcast) and focus the clicked
-// pane. Double-click is the deliberate "focus this one pane" action.
+// C-DoubleClick1Pane to stop synchronize-panes (broadcast) and focus the clicked
+// pane. Ctrl+double-click is the deliberate "focus this one pane" action.
 func TestDoubleClickBindingStopsBroadcast(t *testing.T) {
 	src, err := os.ReadFile("tmux.go")
 	if err != nil {
@@ -1443,18 +1316,18 @@ func TestDoubleClickBindingStopsBroadcast(t *testing.T) {
 	}
 	content := string(src)
 
-	// ConfigureMouseMode must bind DoubleClick1Pane.
-	if !strings.Contains(content, `"DoubleClick1Pane"`) {
-		t.Error(`tmux.go ConfigureMouseMode missing "DoubleClick1Pane" binding`)
+	// ConfigureMouseMode must bind C-DoubleClick1Pane.
+	if !strings.Contains(content, `"C-DoubleClick1Pane"`) {
+		t.Error(`tmux.go ConfigureMouseMode missing "C-DoubleClick1Pane" binding`)
 	}
-	// The DoubleClick1Pane binding must disable synchronize-panes.
+	// The C-DoubleClick1Pane binding must disable synchronize-panes.
 	if !strings.Contains(content, `"synchronize-panes", "off"`) {
-		t.Error(`tmux.go DoubleClick1Pane binding must set synchronize-panes off`)
+		t.Error(`tmux.go C-DoubleClick1Pane binding must set synchronize-panes off`)
 	}
 }
 
 // TestDoubleClickBindingSelectsPaneFirst verifies that ConfigureMouseMode's
-// DoubleClick1Pane binding selects the clicked pane (select-pane -t {mouse})
+// C-DoubleClick1Pane binding selects the clicked pane (select-pane -t {mouse})
 // before disabling broadcast, so the correct pane is targeted.
 func TestDoubleClickBindingSelectsPaneFirst(t *testing.T) {
 	src, err := os.ReadFile("tmux.go")
@@ -1465,284 +1338,12 @@ func TestDoubleClickBindingSelectsPaneFirst(t *testing.T) {
 
 	// The binding must contain select-pane so the clicked pane gets focus first.
 	if !strings.Contains(content, "select-pane") {
-		t.Error(`tmux.go DoubleClick1Pane binding missing "select-pane" — must focus the clicked pane`)
+		t.Error(`tmux.go C-DoubleClick1Pane binding missing "select-pane" — must focus the clicked pane`)
 	}
 	// The {mouse} target makes tmux use the pane under the cursor.
 	if !strings.Contains(content, `"{mouse}"`) {
-		t.Error(`tmux.go DoubleClick1Pane binding missing "{mouse}" target`)
+		t.Error(`tmux.go C-DoubleClick1Pane binding missing "{mouse}" target`)
 	}
 }
 
-// TestBreakAndRemovePaneSourceInspection verifies that RuntimeSession has a
-// BreakAndRemovePane method that (a) calls BreakPane to execute the tmux
-// command and (b) calls RemovePane to update the in-memory domain model.
-// This confirms the "updating the domain model" requirement of AC 13 Sub-AC 3.
-func TestBreakAndRemovePaneSourceInspection(t *testing.T) {
-	src, err := os.ReadFile("tmux.go")
-	if err != nil {
-		t.Fatalf("cannot read tmux.go: %v", err)
-	}
-	content := string(src)
 
-	// Method must be defined on *RuntimeSession.
-	if !strings.Contains(content, "func (s *RuntimeSession) BreakAndRemovePane(") {
-		t.Error(`tmux.go missing "func (s *RuntimeSession) BreakAndRemovePane(" — domain model must expose BreakAndRemovePane`)
-	}
-	// Must delegate the tmux command to BreakPane.
-	if !strings.Contains(content, "BreakPane(paneID)") {
-		t.Error(`tmux.go BreakAndRemovePane missing "BreakPane(paneID)" call — must invoke the tmux break-pane command`)
-	}
-	// Must update the domain model by removing the pane from the slice.
-	if !strings.Contains(content, "s.RemovePane(paneID)") {
-		t.Error(`tmux.go BreakAndRemovePane missing "s.RemovePane(paneID)" — must update the runtime domain model after breaking`)
-	}
-}
-
-// TestBreakAndRemovePaneIntegration uses a fake tmux binary to verify that
-// BreakAndRemovePane (a) invokes "tmux break-pane -t <paneID>" and (b)
-// removes the pane from the RuntimeSession.Panes slice so the domain model
-// reflects the new window layout.
-func TestBreakAndRemovePaneIntegration(t *testing.T) {
-	tmpDir := t.TempDir()
-	logFile := filepath.Join(tmpDir, "calls.log")
-	counterFile := filepath.Join(tmpDir, "pane.n")
-
-	writeFakeTmux(t, tmpDir, logFile, counterFile)
-	t.Setenv("PATH", tmpDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	hosts := []config.ResolvedHost{
-		{DisplayName: "web-01", Host: "web-01.example.com"},
-		{DisplayName: "web-02", Host: "web-02.example.com"},
-		{DisplayName: "db-01", Host: "db-01.example.com"},
-	}
-	session := NewRuntimeSession("@1", []string{"%1", "%2", "%3"}, hosts)
-
-	// Break the middle pane — this simulates what the DoubleClick1Pane
-	// binding would do at the tmux level, plus the domain model update.
-	if err := session.BreakAndRemovePane("%2"); err != nil {
-		t.Fatalf("BreakAndRemovePane(%q) error = %v; want nil", "%2", err)
-	}
-
-	// Domain model must reflect the removal.
-	if len(session.Panes) != 2 {
-		t.Errorf("after BreakAndRemovePane: len(Panes) = %d, want 2", len(session.Panes))
-	}
-	for _, p := range session.Panes {
-		if p.PaneID == "%2" {
-			t.Errorf("BreakAndRemovePane(%%2) did not remove pane from domain model: %%2 still in Panes")
-		}
-	}
-
-	// The tmux break-pane command must have been invoked with the correct target.
-	lines := parseFakeTmuxLog(t, logFile)
-	found := false
-	for _, line := range lines {
-		if strings.HasPrefix(line, "break-pane") && strings.Contains(line, "%2") {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Errorf("no 'break-pane ... %%2' call found in tmux log; lines: %v", lines)
-	}
-}
-
-// TestBreakAndRemovePaneFailureKeepsDomainModel verifies that when the tmux
-// break-pane command fails (e.g. pane does not exist), BreakAndRemovePane
-// returns an error and does NOT remove the pane from the RuntimeSession.Panes
-// slice, keeping the domain model consistent with the actual tmux state.
-func TestBreakAndRemovePaneFailureKeepsDomainModel(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	// Create a fake tmux binary that always fails (exit code 1).
-	failScript := "#!/bin/sh\necho \"error: no such pane\" >&2\nexit 1\n"
-	fakeBin := filepath.Join(tmpDir, "tmux")
-	if err := os.WriteFile(fakeBin, []byte(failScript), 0755); err != nil {
-		t.Fatalf("cannot write failing fake tmux: %v", err)
-	}
-	t.Setenv("PATH", tmpDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	hosts := []config.ResolvedHost{
-		{DisplayName: "web-01", Host: "web-01.example.com"},
-	}
-	session := NewRuntimeSession("@1", []string{"%1"}, hosts)
-
-	err := session.BreakAndRemovePane("%1")
-	if err == nil {
-		t.Fatal("BreakAndRemovePane with failing tmux should return error, got nil")
-	}
-	// The pane must still be in the slice — domain model unchanged on failure.
-	if len(session.Panes) != 1 {
-		t.Errorf("after failed BreakAndRemovePane: len(Panes) = %d, want 1 (unchanged)", len(session.Panes))
-	}
-	if session.Panes[0].PaneID != "%1" {
-		t.Errorf("after failed BreakAndRemovePane: pane %%1 gone from domain model; want it preserved")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// AC 13 Sub-AC 1 — PaneLayout geometry struct and GetPaneLayouts
-// ---------------------------------------------------------------------------
-
-// TestPaneLayoutStructFields is a compile-time check verifying that PaneLayout
-// exists as a struct with the five expected fields for tmux pane geometry.
-func TestPaneLayoutStructFields(t *testing.T) {
-	p := PaneLayout{
-		PaneID: "%3",
-		X:      10,
-		Y:      5,
-		Width:  40,
-		Height: 24,
-	}
-	if p.PaneID != "%3" {
-		t.Errorf("PaneLayout.PaneID = %q, want %%3", p.PaneID)
-	}
-	if p.X != 10 {
-		t.Errorf("PaneLayout.X = %d, want 10", p.X)
-	}
-	if p.Y != 5 {
-		t.Errorf("PaneLayout.Y = %d, want 5", p.Y)
-	}
-	if p.Width != 40 {
-		t.Errorf("PaneLayout.Width = %d, want 40", p.Width)
-	}
-	if p.Height != 24 {
-		t.Errorf("PaneLayout.Height = %d, want 24", p.Height)
-	}
-}
-
-// TestGetPaneLayoutsSourceInspection verifies that GetPaneLayouts is exported
-// and uses the correct tmux format specifiers for pane geometry.
-func TestGetPaneLayoutsSourceInspection(t *testing.T) {
-	src, err := os.ReadFile("tmux.go")
-	if err != nil {
-		t.Fatalf("cannot read tmux.go: %v", err)
-	}
-	content := string(src)
-
-	// GetPaneLayouts must be exported.
-	if !strings.Contains(content, "func GetPaneLayouts(") {
-		t.Error(`tmux.go missing exported "func GetPaneLayouts(" — AC 13 requires pane geometry to be queryable`)
-	}
-	// Must use tmux list-panes command to query pane layout.
-	if !strings.Contains(content, `"list-panes"`) {
-		t.Error(`tmux.go GetPaneLayouts must use "list-panes" command`)
-	}
-	// Must include pane_id so the caller can identify which pane was clicked.
-	if !strings.Contains(content, "pane_id") {
-		t.Error("tmux.go GetPaneLayouts must include #{pane_id} in the format string")
-	}
-	// Must include pane_left and pane_top for the top-left corner position.
-	if !strings.Contains(content, "pane_left") {
-		t.Error("tmux.go GetPaneLayouts must include #{pane_left} in the format string")
-	}
-	if !strings.Contains(content, "pane_top") {
-		t.Error("tmux.go GetPaneLayouts must include #{pane_top} in the format string")
-	}
-	// Must include pane_width and pane_height for bounding-rectangle checks.
-	if !strings.Contains(content, "pane_width") {
-		t.Error("tmux.go GetPaneLayouts must include #{pane_width} in the format string")
-	}
-	if !strings.Contains(content, "pane_height") {
-		t.Error("tmux.go GetPaneLayouts must include #{pane_height} in the format string")
-	}
-}
-
-// TestParsePaneLayoutsSinglePane verifies that parsePaneLayouts correctly
-// parses a single-pane list-panes output line into a PaneLayout struct.
-func TestParsePaneLayoutsSinglePane(t *testing.T) {
-	input := "%1 0 0 80 24"
-	layouts, err := parsePaneLayouts(input)
-	if err != nil {
-		t.Fatalf("parsePaneLayouts(%q) error = %v; want nil", input, err)
-	}
-	if len(layouts) != 1 {
-		t.Fatalf("parsePaneLayouts(%q) returned %d layouts; want 1", input, len(layouts))
-	}
-	p := layouts[0]
-	if p.PaneID != "%1" {
-		t.Errorf("PaneID = %q, want %%1", p.PaneID)
-	}
-	if p.X != 0 || p.Y != 0 {
-		t.Errorf("(X,Y) = (%d,%d), want (0,0)", p.X, p.Y)
-	}
-	if p.Width != 80 || p.Height != 24 {
-		t.Errorf("(Width,Height) = (%d,%d), want (80,24)", p.Width, p.Height)
-	}
-}
-
-// TestParsePaneLayoutsMultiplePanes verifies that parsePaneLayouts handles
-// multi-pane output, correctly parsing each line to a separate PaneLayout.
-func TestParsePaneLayoutsMultiplePanes(t *testing.T) {
-	input := "%1 0 0 40 24\n%2 40 0 40 24\n%3 0 24 80 24"
-	layouts, err := parsePaneLayouts(input)
-	if err != nil {
-		t.Fatalf("parsePaneLayouts error = %v; want nil", err)
-	}
-	if len(layouts) != 3 {
-		t.Fatalf("len(layouts) = %d, want 3", len(layouts))
-	}
-
-	expected := []PaneLayout{
-		{PaneID: "%1", X: 0, Y: 0, Width: 40, Height: 24},
-		{PaneID: "%2", X: 40, Y: 0, Width: 40, Height: 24},
-		{PaneID: "%3", X: 0, Y: 24, Width: 80, Height: 24},
-	}
-	for i, want := range expected {
-		got := layouts[i]
-		if got != want {
-			t.Errorf("layouts[%d] = %+v, want %+v", i, got, want)
-		}
-	}
-}
-
-// TestParsePaneLayoutsEmptyInput verifies that parsePaneLayouts returns an
-// empty slice (not an error) for empty output, which happens when the window
-// has no panes (should not occur in practice but must be safe to handle).
-func TestParsePaneLayoutsEmptyInput(t *testing.T) {
-	layouts, err := parsePaneLayouts("")
-	if err != nil {
-		t.Fatalf("parsePaneLayouts(%q) error = %v; want nil", "", err)
-	}
-	if len(layouts) != 0 {
-		t.Errorf("parsePaneLayouts(%q) = %v; want empty slice", "", layouts)
-	}
-}
-
-// TestGetPaneLayoutsIntegration verifies that GetPaneLayouts calls
-// "tmux list-panes -F <format>" (optionally with -t windowID) using a fake
-// tmux binary that returns a deterministic pane list.
-func TestGetPaneLayoutsIntegration(t *testing.T) {
-	tmpDir := t.TempDir()
-	logFile := filepath.Join(tmpDir, "calls.log")
-
-	// Create a fake tmux that records calls and returns a canned pane list for
-	// the list-panes sub-command.
-	script := "#!/bin/sh\n" +
-		`echo "$*" >> "` + logFile + `"` + "\n" +
-		`case "$1" in` + "\n" +
-		"    list-panes) echo \"%1 0 0 40 24\"; echo \"%2 40 0 40 24\" ;;\n" +
-		"esac\n" +
-		"exit 0\n"
-
-	fakeBin := filepath.Join(tmpDir, "tmux")
-	if err := os.WriteFile(fakeBin, []byte(script), 0755); err != nil {
-		t.Fatalf("writeFakeTmux: %v", err)
-	}
-	t.Setenv("PATH", tmpDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	layouts, err := GetPaneLayouts("@1")
-	if err != nil {
-		t.Fatalf("GetPaneLayouts(@1) error = %v; want nil", err)
-	}
-	if len(layouts) != 2 {
-		t.Fatalf("GetPaneLayouts(@1) returned %d layouts; want 2", len(layouts))
-	}
-
-	if layouts[0].PaneID != "%1" || layouts[0].X != 0 || layouts[0].Y != 0 {
-		t.Errorf("layouts[0] = %+v, want {PaneID:%%1, X:0, Y:0, Width:40, Height:24}", layouts[0])
-	}
-	if layouts[1].PaneID != "%2" || layouts[1].X != 40 || layouts[1].Y != 0 {
-		t.Errorf("layouts[1] = %+v, want {PaneID:%%2, X:40, Y:0, Width:40, Height:24}", layouts[1])
-	}
-}

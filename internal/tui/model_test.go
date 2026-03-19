@@ -4,12 +4,10 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/Suckzoo/smux/internal/config"
-	"github.com/Suckzoo/smux/internal/tmux"
 )
 
 // minimalConfig returns a small *config.Config suitable for TUI unit tests.
@@ -71,7 +69,7 @@ func withWindowSize(m Model, w, h int) Model {
 // state sets Result.Quit = true and returns a tea.Quit command, causing the
 // bubbletea program — and therefore smux — to exit.
 func TestQKeyQuitsSmux(t *testing.T) {
-	m := withWindowSize(New(minimalConfig(), "", nil, nil), 80, 24)
+	m := withWindowSize(New(minimalConfig()), 80, 24)
 
 	m, cmd := sendKey(m, "q")
 
@@ -89,7 +87,7 @@ func TestQKeyQuitsSmux(t *testing.T) {
 // TestCtrlCKeyQuitsSmux verifies that pressing Ctrl+C in the normal (non-filter)
 // TUI state sets Result.Quit = true and returns a tea.Quit command.
 func TestCtrlCKeyQuitsSmux(t *testing.T) {
-	m := withWindowSize(New(minimalConfig(), "", nil, nil), 80, 24)
+	m := withWindowSize(New(minimalConfig()), 80, 24)
 
 	m, cmd := sendKey(m, "ctrl+c")
 
@@ -107,7 +105,7 @@ func TestCtrlCKeyQuitsSmux(t *testing.T) {
 // TestCtrlCInFilterModeQuitsSmux verifies that pressing Ctrl+C while the
 // inline filter is active also exits smux (not just dismisses the filter).
 func TestCtrlCInFilterModeQuitsSmux(t *testing.T) {
-	m := withWindowSize(New(minimalConfig(), "", nil, nil), 80, 24)
+	m := withWindowSize(New(minimalConfig()), 80, 24)
 
 	// Activate filter mode by pressing "/".
 	m, _ = sendKey(m, "/")
@@ -132,7 +130,7 @@ func TestCtrlCInFilterModeQuitsSmux(t *testing.T) {
 // TestCtrlCInConfirmModeQuitsSmux verifies that pressing Ctrl+C during the
 // large-selection confirmation prompt also exits smux entirely.
 func TestCtrlCInConfirmModeQuitsSmux(t *testing.T) {
-	m := withWindowSize(New(minimalConfig(), "", nil, nil), 80, 24)
+	m := withWindowSize(New(minimalConfig()), 80, 24)
 
 	// Force confirmation mode directly (simulates ≥50-host selection).
 	m.state.Phase = ConfirmingPhase{Threshold: DefaultConfirmThreshold}
@@ -178,7 +176,7 @@ func multiClusterConfig() *config.Config {
 // flat tree list when both clusters are expanded.
 func TestMultiClusterHostListedUnderEachCluster(t *testing.T) {
 	cfg := multiClusterConfig()
-	m := withWindowSize(New(cfg, "", nil, nil), 80, 24)
+	m := withWindowSize(New(cfg), 80, 24)
 
 	// Count how many host nodes have the name "shared-host".
 	sharedCount := 0
@@ -206,7 +204,7 @@ func TestMultiClusterHostListedUnderEachCluster(t *testing.T) {
 // contains both "cluster-a" and "cluster-b" (all clusters that host belongs to).
 func TestMultiClusterSelectedHostCarriesAllClusters(t *testing.T) {
 	cfg := multiClusterConfig()
-	m := withWindowSize(New(cfg, "", nil, nil), 80, 24)
+	m := withWindowSize(New(cfg), 80, 24)
 
 	// Navigate to the shared-host node under cluster-a and select it.
 	// flat list (all expanded, sorted clusters): cluster-a header, shared-host,
@@ -252,7 +250,7 @@ func TestMultiClusterSelectedHostCarriesAllClusters(t *testing.T) {
 // ResolvedHost with ClusterNames containing both clusters.
 func TestMultiClusterSelectFromSecondClusterCarriesAllClusters(t *testing.T) {
 	cfg := multiClusterConfig()
-	m := withWindowSize(New(cfg, "", nil, nil), 80, 24)
+	m := withWindowSize(New(cfg), 80, 24)
 
 	// Find shared-host under cluster-b.
 	targetIdx := -1
@@ -299,7 +297,7 @@ const tooSmallMsg = "Terminal too small (need at least 40×10)"
 // TestTerminalTooSmallNarrow checks that a terminal narrower than 40 columns
 // shows the guard message.
 func TestTerminalTooSmallNarrow(t *testing.T) {
-	m := withWindowSize(New(minimalConfig(), "", nil, nil), 39, 24)
+	m := withWindowSize(New(minimalConfig()), 39, 24)
 	view := m.View()
 	if view != tooSmallMsg {
 		t.Errorf("expected too-small message for 39-col terminal, got: %q", view)
@@ -309,7 +307,7 @@ func TestTerminalTooSmallNarrow(t *testing.T) {
 // TestTerminalTooSmallShort checks that a terminal shorter than 10 rows shows
 // the guard message.
 func TestTerminalTooSmallShort(t *testing.T) {
-	m := withWindowSize(New(minimalConfig(), "", nil, nil), 80, 9)
+	m := withWindowSize(New(minimalConfig()), 80, 9)
 	view := m.View()
 	if view != tooSmallMsg {
 		t.Errorf("expected too-small message for 9-row terminal, got: %q", view)
@@ -319,7 +317,7 @@ func TestTerminalTooSmallShort(t *testing.T) {
 // TestTerminalAtMinimumSize checks that a terminal exactly at the 40×10
 // boundary does NOT show the guard message (boundary is inclusive).
 func TestTerminalAtMinimumSize(t *testing.T) {
-	m := withWindowSize(New(minimalConfig(), "", nil, nil), 40, 10)
+	m := withWindowSize(New(minimalConfig()), 40, 10)
 	view := m.View()
 	if view == tooSmallMsg {
 		t.Error("40×10 terminal should not show too-small message")
@@ -329,7 +327,7 @@ func TestTerminalAtMinimumSize(t *testing.T) {
 // TestTerminalNormalSize checks that a 120×40 terminal shows the normal TUI,
 // not the too-small guard.
 func TestTerminalNormalSize(t *testing.T) {
-	m := withWindowSize(New(minimalConfig(), "", nil, nil), 120, 40)
+	m := withWindowSize(New(minimalConfig()), 120, 40)
 	view := m.View()
 	if view == tooSmallMsg {
 		t.Error("120×40 terminal should show normal TUI, not too-small message")
@@ -339,7 +337,7 @@ func TestTerminalNormalSize(t *testing.T) {
 // TestTerminalTooSmallBothDimensions checks the guard fires when both width
 // and height are below their respective minimums.
 func TestTerminalTooSmallBothDimensions(t *testing.T) {
-	m := withWindowSize(New(minimalConfig(), "", nil, nil), 20, 5)
+	m := withWindowSize(New(minimalConfig()), 20, 5)
 	view := m.View()
 	if view != tooSmallMsg {
 		t.Errorf("expected too-small message for 20×5 terminal, got: %q", view)
@@ -349,7 +347,7 @@ func TestTerminalTooSmallBothDimensions(t *testing.T) {
 // TestTerminalTooSmallAtZero checks that a zero-value Model (no WindowSizeMsg
 // delivered yet) triggers the guard because width and height are both 0.
 func TestTerminalTooSmallAtZero(t *testing.T) {
-	m := New(minimalConfig(), "", nil, nil)
+	m := New(minimalConfig())
 	view := m.View()
 	if view != tooSmallMsg {
 		t.Errorf("expected too-small message for zero-size model, got: %q", view)
@@ -363,7 +361,7 @@ func TestTerminalTooSmallAtZero(t *testing.T) {
 // TestSpaceSelectsHost verifies that pressing Space on a host node marks it as
 // selected and that pressing Space again deselects it.
 func TestSpaceSelectsHost(t *testing.T) {
-	m := withWindowSize(New(minimalConfig(), "", nil, nil), 80, 24)
+	m := withWindowSize(New(minimalConfig()), 80, 24)
 
 	// Find the index of the first host node ("host-01" under "test-cluster").
 	hostIdx := -1
@@ -397,7 +395,7 @@ func TestSpaceSelectsHost(t *testing.T) {
 // TestSpaceOnClusterSelectsAll verifies that pressing Space on a cluster node
 // when no hosts are selected marks every host in that cluster as selected.
 func TestSpaceOnClusterSelectsAll(t *testing.T) {
-	m := withWindowSize(New(minimalConfig(), "", nil, nil), 80, 24)
+	m := withWindowSize(New(minimalConfig()), 80, 24)
 
 	// The first flat node should be the cluster header.
 	if len(m.flatNodes) == 0 || !m.flatNodes[0].IsCluster() {
@@ -420,7 +418,7 @@ func TestSpaceOnClusterSelectsAll(t *testing.T) {
 // TestSpaceOnClusterDeselectsAll verifies that pressing Space on a cluster node
 // when ALL hosts are already selected deselects every host in that cluster.
 func TestSpaceOnClusterDeselectsAll(t *testing.T) {
-	m := withWindowSize(New(minimalConfig(), "", nil, nil), 80, 24)
+	m := withWindowSize(New(minimalConfig()), 80, 24)
 
 	// First Space: select all.
 	m.view.Cursor = 0
@@ -441,7 +439,7 @@ func TestSpaceOnClusterDeselectsAll(t *testing.T) {
 // where only some hosts are selected selects ALL hosts (not a toggle of the
 // partial state).
 func TestSpaceOnClusterPartialSelectsAll(t *testing.T) {
-	m := withWindowSize(New(minimalConfig(), "", nil, nil), 80, 24)
+	m := withWindowSize(New(minimalConfig()), 80, 24)
 
 	// Select only the first host manually.
 	hostIdx := -1
@@ -476,7 +474,7 @@ func TestSpaceOnClusterPartialSelectsAll(t *testing.T) {
 // collapsed cluster node (where host rows are hidden) still selects all of its
 // hosts — the toggle operates on the cluster's membership, not the visible rows.
 func TestSpaceOnCollapsedClusterSelectsAll(t *testing.T) {
-	m := withWindowSize(New(minimalConfig(), "", nil, nil), 80, 24)
+	m := withWindowSize(New(minimalConfig()), 80, 24)
 
 	// Collapse the cluster by pressing Tab (which calls toggleExpand).
 	m.view.Cursor = 0
@@ -527,7 +525,7 @@ func filterConfig() *config.Config {
 // TestSlashEntersFilterMode verifies that pressing '/' in normal mode activates
 // filter mode (filterActive becomes true) and focuses the inline text input.
 func TestSlashEntersFilterMode(t *testing.T) {
-	m := withWindowSize(New(minimalConfig(), "", nil, nil), 80, 24)
+	m := withWindowSize(New(minimalConfig()), 80, 24)
 
 	if m.isFilterActive() {
 		t.Fatal("filterActive should be false at start")
@@ -547,7 +545,7 @@ func TestSlashEntersFilterMode(t *testing.T) {
 // boolean field (compile-time check that the field is accessible within the
 // package).
 func TestFilterActiveFieldExists(t *testing.T) {
-	m := New(minimalConfig(), "", nil, nil)
+	m := New(minimalConfig())
 	// Access both fields to prove they exist with expected types.
 	var active bool = m.isFilterActive()
 	filterVal := m.filterInput.Value()
@@ -563,7 +561,7 @@ func TestFilterActiveFieldExists(t *testing.T) {
 // mode deactivates filter mode and clears the filter text, restoring the full
 // host list.
 func TestEscExitsFilterModeAndClearsInput(t *testing.T) {
-	m := withWindowSize(New(filterConfig(), "", nil, nil), 80, 24)
+	m := withWindowSize(New(filterConfig()), 80, 24)
 
 	// Enter filter mode.
 	m, _ = sendKey(m, "/")
@@ -589,7 +587,7 @@ func TestEscExitsFilterModeAndClearsInput(t *testing.T) {
 // filter mode commits the current filter (keeps its value) and exits filter
 // typing mode (filterActive becomes false).
 func TestEnterCommitsFilterAndExitsTypingMode(t *testing.T) {
-	m := withWindowSize(New(filterConfig(), "", nil, nil), 80, 24)
+	m := withWindowSize(New(filterConfig()), 80, 24)
 
 	m, _ = sendKey(m, "/")
 
@@ -604,7 +602,7 @@ func TestEnterCommitsFilterAndExitsTypingMode(t *testing.T) {
 // TestFilterReducesVisibleNodes verifies that typing a filter string while in
 // filter mode narrows the flat node list to only matching entries.
 func TestFilterReducesVisibleNodes(t *testing.T) {
-	m := withWindowSize(New(filterConfig(), "", nil, nil), 80, 24)
+	m := withWindowSize(New(filterConfig()), 80, 24)
 
 	// Record initial node count (all clusters expanded, all hosts visible).
 	initialCount := len(m.flatNodes)
@@ -632,7 +630,7 @@ func TestFilterReducesVisibleNodes(t *testing.T) {
 // TestFilterEmptyAfterEsc verifies that after Esc the flat list is restored to
 // its unfiltered state (same size as a freshly built model).
 func TestFilterEmptyAfterEsc(t *testing.T) {
-	m := withWindowSize(New(filterConfig(), "", nil, nil), 80, 24)
+	m := withWindowSize(New(filterConfig()), 80, 24)
 	initialCount := len(m.flatNodes)
 
 	// Enter filter mode, type something, then Esc.
@@ -652,7 +650,7 @@ func TestFilterEmptyAfterEsc(t *testing.T) {
 // TestSlashDoesNotQuit verifies that pressing '/' does not accidentally trigger
 // the quit path.
 func TestSlashDoesNotQuit(t *testing.T) {
-	m := withWindowSize(New(minimalConfig(), "", nil, nil), 80, 24)
+	m := withWindowSize(New(minimalConfig()), 80, 24)
 
 	m, cmd := sendKey(m, "/")
 
@@ -673,7 +671,7 @@ func TestSlashDoesNotQuit(t *testing.T) {
 // the selection result (no duplicate SSH connections to the same host).
 func TestMultiClusterDeduplicatesBothSelected(t *testing.T) {
 	cfg := multiClusterConfig()
-	m := withWindowSize(New(cfg, "", nil, nil), 80, 24)
+	m := withWindowSize(New(cfg), 80, 24)
 
 	// Select shared-host under cluster-a.
 	for i, node := range m.flatNodes {
@@ -715,7 +713,7 @@ func TestMultiClusterDeduplicatesBothSelected(t *testing.T) {
 // TestEscClearsFilterString is a dedicated Sub-AC 3 test verifying that Esc
 // in filter mode zeroes the filter string so that filterInput.Value() == "".
 func TestEscClearsFilterString(t *testing.T) {
-	m := withWindowSize(New(minimalConfig(), "", nil, nil), 80, 24)
+	m := withWindowSize(New(minimalConfig()), 80, 24)
 
 	// Enter filter mode and type a query.
 	m, _ = sendKey(m, "/")
@@ -736,7 +734,7 @@ func TestEscClearsFilterString(t *testing.T) {
 // TestEscExitsFilterMode is a dedicated Sub-AC 3 test verifying that Esc
 // transitions the model out of filter mode (filterActive becomes false).
 func TestEscExitsFilterMode(t *testing.T) {
-	m := withWindowSize(New(minimalConfig(), "", nil, nil), 80, 24)
+	m := withWindowSize(New(minimalConfig()), 80, 24)
 
 	m, _ = sendKey(m, "/")
 	if !m.isFilterActive() {
@@ -752,7 +750,7 @@ func TestEscExitsFilterMode(t *testing.T) {
 // TestEscRestoresFullUnfilteredList is a dedicated Sub-AC 3 test verifying
 // that after Esc the flat node list matches the unfiltered baseline count.
 func TestEscRestoresFullUnfilteredList(t *testing.T) {
-	m := withWindowSize(New(minimalConfig(), "", nil, nil), 80, 24)
+	m := withWindowSize(New(minimalConfig()), 80, 24)
 
 	// Baseline: all clusters expanded, no filter.
 	baseline := len(m.flatNodes)
@@ -801,7 +799,7 @@ func confirmingConfig(n int) *config.Config {
 // large-selection confirmation prompt is displayed confirms the selection and
 // causes the TUI to exit with the selected hosts in the result (same as y/Y).
 func TestConfirmingEnterConfirmsLaunch(t *testing.T) {
-	m := withWindowSize(New(minimalConfig(), "", nil, nil), 80, 24)
+	m := withWindowSize(New(minimalConfig()), 80, 24)
 
 	// Select one host BEFORE entering confirming mode, so result will be non-empty.
 	for i, node := range m.flatNodes {
@@ -839,7 +837,7 @@ func TestConfirmingEnterConfirmsLaunch(t *testing.T) {
 // slice produced by a second Enter press matches the selected hosts.
 func TestConfirmingEnterResultHasCorrectHosts(t *testing.T) {
 	cfg := minimalConfig()
-	m := withWindowSize(New(cfg, "", nil, nil), 80, 24)
+	m := withWindowSize(New(cfg), 80, 24)
 
 	// Select every host in the cluster.
 	m.view.Cursor = 0 // cluster node
@@ -863,7 +861,7 @@ func TestConfirmingEnterResultHasCorrectHosts(t *testing.T) {
 // TestConfirmingNGoesBack verifies that pressing n in confirming state cancels
 // the confirmation prompt and returns the model to the browsing phase.
 func TestConfirmingNGoesBack(t *testing.T) {
-	m := withWindowSize(New(minimalConfig(), "", nil, nil), 80, 24)
+	m := withWindowSize(New(minimalConfig()), 80, 24)
 	m.state.Phase = ConfirmingPhase{Threshold: DefaultConfirmThreshold}
 
 	m, cmd := sendKey(m, "n")
@@ -882,7 +880,7 @@ func TestConfirmingNGoesBack(t *testing.T) {
 // TestConfirmingEscGoesBack verifies that pressing Esc in confirming state
 // also cancels the prompt and returns to the browsing phase.
 func TestConfirmingEscGoesBack(t *testing.T) {
-	m := withWindowSize(New(minimalConfig(), "", nil, nil), 80, 24)
+	m := withWindowSize(New(minimalConfig()), 80, 24)
 	m.state.Phase = ConfirmingPhase{Threshold: DefaultConfirmThreshold}
 
 	m, cmd := sendKey(m, "esc")
@@ -920,7 +918,7 @@ func TestCustomConfirmThresholdRespected(t *testing.T) {
 // than the threshold proceeds directly to launch without the confirmation prompt.
 func TestSmallSelectionSkipsConfirmationPrompt(t *testing.T) {
 	cfg := minimalConfig() // 2 hosts — well below default threshold of 50
-	m := withWindowSize(New(cfg, "", nil, nil), 80, 24)
+	m := withWindowSize(New(cfg), 80, 24)
 
 	// Select all hosts.
 	m.view.Cursor = 0
@@ -959,7 +957,7 @@ func TestLargeSelectionEntersConfirmingMode(t *testing.T) {
 			},
 		},
 	}
-	m := withWindowSize(New(cfg, "", nil, nil), 80, 24)
+	m := withWindowSize(New(cfg), 80, 24)
 
 	// Select all 2 hosts (meets threshold of 2).
 	m.view.Cursor = 0
@@ -1005,7 +1003,7 @@ func TestLargeSelectionEntersConfirmingMode(t *testing.T) {
 // TestEnterWithNoSelectionDoesNothing verifies that pressing Enter when no
 // hosts are selected leaves the model in BrowsingPhase and does not exit.
 func TestEnterWithNoSelectionDoesNothing(t *testing.T) {
-	m := withWindowSize(New(minimalConfig(), "", nil, nil), 80, 24)
+	m := withWindowSize(New(minimalConfig()), 80, 24)
 
 	if len(m.selectedHosts()) != 0 {
 		t.Fatal("expected no hosts selected at start")
@@ -1027,7 +1025,7 @@ func TestEnterWithNoSelectionDoesNothing(t *testing.T) {
 // TestBrowsingPhaseViewShowsTitle verifies that View() in PhaseBrowsing
 // includes the smux title string — distinguishing it from the confirming UI.
 func TestBrowsingPhaseViewShowsTitle(t *testing.T) {
-	m := withWindowSize(New(minimalConfig(), "", nil, nil), 80, 24)
+	m := withWindowSize(New(minimalConfig()), 80, 24)
 	view := m.View()
 
 	if !strings.Contains(view, "smux") {
@@ -1042,7 +1040,7 @@ func TestBrowsingPhaseViewShowsTitle(t *testing.T) {
 // PhaseConfirming renders the confirmation box — not the cluster tree — so
 // the user sees a distinct prompt asking them to confirm a large selection.
 func TestConfirmingPhaseViewIsDistinctFromBrowsing(t *testing.T) {
-	m := withWindowSize(New(minimalConfig(), "", nil, nil), 80, 24)
+	m := withWindowSize(New(minimalConfig()), 80, 24)
 	m.state.Phase = ConfirmingPhase{Threshold: DefaultConfirmThreshold}
 
 	view := m.View()
@@ -1100,7 +1098,7 @@ func TestThresholdGuardUsesConfigValue(t *testing.T) {
 			},
 		},
 	}
-	m := withWindowSize(New(cfg, "", nil, nil), 80, 24)
+	m := withWindowSize(New(cfg), 80, 24)
 
 	// Select all 3 hosts by pressing Space on the cluster header.
 	m.view.Cursor = 0
@@ -1131,7 +1129,7 @@ func TestThresholdGuardBelowCustomValue(t *testing.T) {
 			},
 		},
 	}
-	m := withWindowSize(New(cfg, "", nil, nil), 80, 24)
+	m := withWindowSize(New(cfg), 80, 24)
 
 	// Select all 2 hosts (below threshold 3).
 	m.view.Cursor = 0
@@ -1213,7 +1211,7 @@ func TestConfirmingPhaseThresholdFieldIsConfigurable(t *testing.T) {
 // is the canonical holder of the Phase — not a loose bool — separating domain
 // concerns from view concerns.
 func TestModelStatePhaseIsSelectionDomain(t *testing.T) {
-	m := New(minimalConfig(), "", nil, nil)
+	m := New(minimalConfig())
 
 	// SelectionState.Phase must start as BrowsingPhase.
 	if _, ok := m.state.Phase.(BrowsingPhase); !ok {
@@ -1234,7 +1232,7 @@ func TestModelStatePhaseIsSelectionDomain(t *testing.T) {
 // prompt is shown with the default threshold (50), the threshold value 50
 // appears in the rendered view.
 func TestConfirmViewDisplaysDefaultThreshold(t *testing.T) {
-	m := withWindowSize(New(minimalConfig(), "", nil, nil), 80, 24)
+	m := withWindowSize(New(minimalConfig()), 80, 24)
 
 	// Force confirming mode with the default threshold value.
 	m.state.Phase = ConfirmingPhase{Threshold: DefaultConfirmThreshold}
@@ -1260,7 +1258,7 @@ func TestConfirmViewDisplaysCustomThreshold(t *testing.T) {
 			},
 		},
 	}
-	m := withWindowSize(New(cfg, "", nil, nil), 80, 24)
+	m := withWindowSize(New(cfg), 80, 24)
 
 	// Trigger confirming mode with threshold=7 (as handleEnter would set it).
 	m.state.Phase = ConfirmingPhase{Threshold: 7}
@@ -1291,7 +1289,7 @@ func TestConfirmViewThresholdFromHandleEnter(t *testing.T) {
 			},
 		},
 	}
-	m := withWindowSize(New(cfg, "", nil, nil), 80, 24)
+	m := withWindowSize(New(cfg), 80, 24)
 
 	// Select all 3 hosts (meets threshold).
 	m.view.Cursor = 0
@@ -1315,74 +1313,6 @@ func TestConfirmViewThresholdFromHandleEnter(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// AC 11 – M-a break-pane keybinding
-// ---------------------------------------------------------------------------
-
-// TestAltAEmitsBreakPaneMsg verifies that pressing M-a (alt+a) when a
-// lastWindowID is set returns a tea.Cmd that produces a BreakPaneMsg carrying
-// the correct WindowID. This decouples the key event from the tmux action.
-func TestAltAEmitsBreakPaneMsg(t *testing.T) {
-	m := withWindowSize(New(minimalConfig(), "@42", nil, nil), 80, 24)
-
-	altA := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a"), Alt: true}
-	updated, cmd := m.Update(altA)
-	_ = updated
-
-	if cmd == nil {
-		t.Fatal("alt+a with a lastWindowID should return a non-nil tea.Cmd")
-	}
-
-	resultMsg := cmd()
-	bp, ok := resultMsg.(BreakPaneMsg)
-	if !ok {
-		t.Fatalf("expected BreakPaneMsg from cmd(), got %T", resultMsg)
-	}
-	if bp.WindowID != "@42" {
-		t.Errorf("BreakPaneMsg.WindowID = %q, want %q", bp.WindowID, "@42")
-	}
-}
-
-// TestAltANoOpWithoutWindowID verifies that pressing M-a when no SSH window
-// has been created yet (lastWindowID == "") is a safe no-op and returns nil.
-func TestAltANoOpWithoutWindowID(t *testing.T) {
-	m := withWindowSize(New(minimalConfig(), "", nil, nil), 80, 24)
-
-	altA := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a"), Alt: true}
-	_, cmd := m.Update(altA)
-
-	if cmd != nil {
-		t.Error("alt+a without a lastWindowID should return nil cmd (no-op)")
-	}
-}
-
-// TestBreakPaneMsgInvokesCallback verifies that when the update loop receives
-// a BreakPaneMsg it invokes the breakPane callback with the correct WindowID.
-func TestBreakPaneMsgInvokesCallback(t *testing.T) {
-	var calledWith string
-	breakPane := func(windowID string) error {
-		calledWith = windowID
-		return nil
-	}
-
-	m := withWindowSize(New(minimalConfig(), "@7", nil, breakPane), 80, 24)
-
-	_, _ = m.Update(BreakPaneMsg{WindowID: "@7"})
-
-	if calledWith != "@7" {
-		t.Errorf("breakPane callback called with %q, want %q", calledWith, "@7")
-	}
-}
-
-// TestBreakPaneMsgNilCallbackNocrash verifies that receiving a BreakPaneMsg
-// with a nil breakPane callback does not panic and is a safe no-op.
-func TestBreakPaneMsgNilCallbackNocrash(t *testing.T) {
-	m := withWindowSize(New(minimalConfig(), "@5", nil, nil), 80, 24)
-
-	// Must not panic.
-	_, _ = m.Update(BreakPaneMsg{WindowID: "@5"})
-}
-
-// ---------------------------------------------------------------------------
 // AC 15 Sub-AC 2 – fresh TUI on loop-back: selections cleared
 // ---------------------------------------------------------------------------
 
@@ -1391,7 +1321,7 @@ func TestBreakPaneMsgNilCallbackNocrash(t *testing.T) {
 // to produce a fresh TUI after each SSH window creation without any previous
 // host selections leaking into the next iteration.
 func TestNewModelHasNoSelections(t *testing.T) {
-	m := New(minimalConfig(), "", nil, nil)
+	m := New(minimalConfig())
 
 	if len(m.state.Selected) != 0 {
 		t.Errorf("New model state.Selected has %d entries; want 0 (fresh TUI must have no selections)",
@@ -1407,7 +1337,7 @@ func TestNewModelHasNoSelections(t *testing.T) {
 // such as ConfirmingPhase or LaunchingPhase. Each loop-back must present the
 // user with a clean browsing experience.
 func TestNewModelStartsInBrowsingPhase(t *testing.T) {
-	m := New(minimalConfig(), "", nil, nil)
+	m := New(minimalConfig())
 
 	if _, ok := m.state.Phase.(BrowsingPhase); !ok {
 		t.Errorf("New model state.Phase = %T; want BrowsingPhase (fresh TUI must start in browsing state)",
@@ -1423,7 +1353,7 @@ func TestSelectionsNotCarriedBetweenTUIIterations(t *testing.T) {
 	cfg := minimalConfig()
 
 	// Simulate first TUI iteration: user selects all hosts.
-	m1 := withWindowSize(New(cfg, "", nil, nil), 80, 24)
+	m1 := withWindowSize(New(cfg), 80, 24)
 	m1.view.Cursor = 0
 	m1, _ = sendKey(m1, " ") // select the cluster (all hosts)
 	if len(m1.selectedHosts()) == 0 {
@@ -1433,7 +1363,7 @@ func TestSelectionsNotCarriedBetweenTUIIterations(t *testing.T) {
 	// Simulate second TUI iteration: a brand-new model is constructed.
 	// In main.go this happens when runTUI calls tui.New(cfg, ...) at the top
 	// of every loop body.
-	m2 := New(cfg, "", nil, nil)
+	m2 := New(cfg)
 
 	if len(m2.state.Selected) != 0 {
 		t.Errorf("second TUI iteration: state.Selected has %d entries; want 0 — selections must not carry over",
@@ -1451,7 +1381,7 @@ func TestNewModelCursorStartsAtZero(t *testing.T) {
 	cfg := minimalConfig()
 
 	// Simulate first iteration moving cursor down.
-	m1 := withWindowSize(New(cfg, "", nil, nil), 80, 24)
+	m1 := withWindowSize(New(cfg), 80, 24)
 	m1, _ = sendKey(m1, "down")
 	m1, _ = sendKey(m1, "down")
 	if m1.view.Cursor == 0 {
@@ -1459,261 +1389,9 @@ func TestNewModelCursorStartsAtZero(t *testing.T) {
 	}
 
 	// Second iteration must reset the cursor.
-	m2 := New(cfg, "", nil, nil)
+	m2 := New(cfg)
 	if m2.view.Cursor != 0 {
 		t.Errorf("new TUI model view.Cursor = %d; want 0 (fresh TUI must reset cursor to top)",
 			m2.view.Cursor)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// AC 13 Sub-AC 1 — Double-click detection and break-pane mapping
-// ---------------------------------------------------------------------------
-
-// sendMousePress delivers a left-button press mouse event to the model.
-func sendMousePress(m Model, x, y int) (Model, tea.Cmd) {
-	msg := tea.MouseMsg{
-		Action: tea.MouseActionPress,
-		Button: tea.MouseButtonLeft,
-		X:      x,
-		Y:      y,
-	}
-	updated, cmd := m.Update(msg)
-	return updated.(Model), cmd
-}
-
-// TestWithPaneLayoutsOptionApplied verifies that WithPaneLayouts stores the
-// supplied layouts in the model's paneLayouts field.
-func TestWithPaneLayoutsOptionApplied(t *testing.T) {
-	cfg := minimalConfig()
-	layouts := []tmux.PaneLayout{
-		{PaneID: "%1", X: 0, Y: 0, Width: 80, Height: 24},
-		{PaneID: "%2", X: 0, Y: 24, Width: 80, Height: 24},
-	}
-	m := New(cfg, "", nil, nil, WithPaneLayouts(layouts))
-	if len(m.paneLayouts) != 2 {
-		t.Fatalf("paneLayouts length = %d; want 2", len(m.paneLayouts))
-	}
-	if m.paneLayouts[0].PaneID != "%1" {
-		t.Errorf("paneLayouts[0].PaneID = %q; want %%1", m.paneLayouts[0].PaneID)
-	}
-	if m.paneLayouts[1].PaneID != "%2" {
-		t.Errorf("paneLayouts[1].PaneID = %q; want %%2", m.paneLayouts[1].PaneID)
-	}
-}
-
-// TestFindPaneAtReturnsCorrectPaneID tests the findPaneAt geometry helper
-// directly. It places two non-overlapping panes and checks that each point
-// inside a pane returns that pane's ID, while a point outside returns "".
-func TestFindPaneAtReturnsCorrectPaneID(t *testing.T) {
-	cfg := minimalConfig()
-	layouts := []tmux.PaneLayout{
-		{PaneID: "%10", X: 0, Y: 0, Width: 40, Height: 12},
-		{PaneID: "%11", X: 40, Y: 0, Width: 40, Height: 12},
-	}
-	m := New(cfg, "", nil, nil, WithPaneLayouts(layouts))
-
-	cases := []struct {
-		x, y   int
-		wantID string
-	}{
-		{0, 0, "%10"},
-		{20, 6, "%10"},
-		{39, 11, "%10"},
-		{40, 0, "%11"},
-		{79, 11, "%11"},
-		{0, 12, ""},  // below both panes
-		{80, 0, ""}, // right of both panes
-	}
-	for _, tc := range cases {
-		got := m.findPaneAt(tc.x, tc.y)
-		if got != tc.wantID {
-			t.Errorf("findPaneAt(%d, %d) = %q; want %q", tc.x, tc.y, got, tc.wantID)
-		}
-	}
-}
-
-// TestSingleClickDoesNotTriggerBreakPane verifies that a single mouse press
-// never invokes the breakPane callback, regardless of pane layouts.
-func TestSingleClickDoesNotTriggerBreakPane(t *testing.T) {
-	cfg := minimalConfig()
-	called := false
-	layouts := []tmux.PaneLayout{
-		{PaneID: "%1", X: 0, Y: 0, Width: 80, Height: 24},
-	}
-	m := New(cfg, "1", nil, func(paneID string) error {
-		called = true
-		return nil
-	}, WithPaneLayouts(layouts))
-	m = withWindowSize(m, 80, 24)
-
-	// Single click — should NOT trigger breakPane.
-	_, cmd := sendMousePress(m, 10, 5)
-	if cmd != nil {
-		// Execute the command to see if it calls breakPane.
-		cmd()
-	}
-	if called {
-		t.Error("single click invoked breakPane; expected no call")
-	}
-}
-
-// TestDoubleClickCallsBreakPaneWithCorrectPaneID verifies that two consecutive
-// left-button presses within doubleClickWindow at the same location cause the
-// breakPane callback to be invoked with the pane ID that covers those
-// coordinates.
-func TestDoubleClickCallsBreakPaneWithCorrectPaneID(t *testing.T) {
-	cfg := minimalConfig()
-	var gotPaneID string
-	layouts := []tmux.PaneLayout{
-		{PaneID: "%5", X: 0, Y: 0, Width: 40, Height: 24},
-		{PaneID: "%6", X: 40, Y: 0, Width: 40, Height: 24},
-	}
-	m := New(cfg, "1", nil, func(paneID string) error {
-		gotPaneID = paneID
-		return nil
-	}, WithPaneLayouts(layouts))
-	m = withWindowSize(m, 80, 24)
-
-	// First click — records the click time/position; no double-click yet.
-	m, _ = sendMousePress(m, 50, 10)
-
-	// Set lastClickTime to "just now minus 100ms" to simulate a fast second click.
-	m.lastClickTime = time.Now().Add(-100 * time.Millisecond)
-
-	// Second click at the same location — should be detected as double-click.
-	_, cmd := sendMousePress(m, 50, 10)
-	if cmd == nil {
-		t.Fatal("double-click returned nil cmd; expected a breakPane command")
-	}
-	// Execute the command synchronously so the callback fires.
-	cmd()
-
-	if gotPaneID != "%6" {
-		t.Errorf("breakPane called with paneID = %q; want %%6 (x=50 is in the right pane at x=40..79)",
-			gotPaneID)
-	}
-}
-
-// TestDoubleClickTooSlowDoesNotTriggerBreakPane verifies that two clicks that
-// are separated by more than doubleClickWindow are NOT treated as a double-click
-// and do NOT invoke the breakPane callback.
-func TestDoubleClickTooSlowDoesNotTriggerBreakPane(t *testing.T) {
-	cfg := minimalConfig()
-	called := false
-	layouts := []tmux.PaneLayout{
-		{PaneID: "%1", X: 0, Y: 0, Width: 80, Height: 24},
-	}
-	m := New(cfg, "1", nil, func(paneID string) error {
-		called = true
-		return nil
-	}, WithPaneLayouts(layouts))
-	m = withWindowSize(m, 80, 24)
-
-	// First click at t=0.
-	m, _ = sendMousePress(m, 10, 5)
-
-	// Simulate a long pause (400ms > doubleClickWindow=300ms).
-	m.lastClickTime = time.Now().Add(-400 * time.Millisecond)
-
-	// Second click — should NOT be a double-click.
-	_, cmd := sendMousePress(m, 10, 5)
-	if cmd != nil {
-		cmd()
-	}
-	if called {
-		t.Error("slow double-click invoked breakPane; expected no call")
-	}
-}
-
-// TestDoubleClickNilBreakPaneNoOp verifies that a valid double-click with no
-// breakPane callback set does not panic and returns no cmd.
-func TestDoubleClickNilBreakPaneNoOp(t *testing.T) {
-	cfg := minimalConfig()
-	layouts := []tmux.PaneLayout{
-		{PaneID: "%1", X: 0, Y: 0, Width: 80, Height: 24},
-	}
-	m := New(cfg, "", nil, nil, WithPaneLayouts(layouts))
-	m = withWindowSize(m, 80, 24)
-
-	// First click.
-	m, _ = sendMousePress(m, 10, 5)
-	m.lastClickTime = time.Now().Add(-100 * time.Millisecond)
-
-	// Second click (double-click) with nil breakPane — must not panic.
-	_, cmd := sendMousePress(m, 10, 5)
-	if cmd != nil {
-		cmd()
-	}
-	// If we reach here without panic, the test passes.
-}
-
-// TestDoubleClickNoPaneLayoutsNoOp verifies that a valid double-click with an
-// empty paneLayouts slice does not invoke breakPane and returns no cmd.
-func TestDoubleClickNoPaneLayoutsNoOp(t *testing.T) {
-	cfg := minimalConfig()
-	called := false
-	// No WithPaneLayouts — paneLayouts is empty.
-	m := New(cfg, "1", nil, func(paneID string) error {
-		called = true
-		return nil
-	})
-	m = withWindowSize(m, 80, 24)
-
-	// First click.
-	m, _ = sendMousePress(m, 10, 5)
-	m.lastClickTime = time.Now().Add(-100 * time.Millisecond)
-
-	// Second click — no paneLayouts, so breakPane must NOT be called.
-	_, cmd := sendMousePress(m, 10, 5)
-	if cmd != nil {
-		cmd()
-	}
-	if called {
-		t.Error("double-click with no paneLayouts invoked breakPane; expected no call")
-	}
-}
-
-// TestDoubleClickOutsideAllPanesNoOp verifies that a double-click at coordinates
-// not covered by any pane does not invoke breakPane.
-func TestDoubleClickOutsideAllPanesNoOp(t *testing.T) {
-	cfg := minimalConfig()
-	called := false
-	layouts := []tmux.PaneLayout{
-		{PaneID: "%1", X: 10, Y: 10, Width: 20, Height: 10},
-	}
-	m := New(cfg, "1", nil, func(paneID string) error {
-		called = true
-		return nil
-	}, WithPaneLayouts(layouts))
-	m = withWindowSize(m, 80, 24)
-
-	// Click at (0,0) — outside the single pane at (10,10)+(20x10).
-	m, _ = sendMousePress(m, 0, 0)
-	m.lastClickTime = time.Now().Add(-100 * time.Millisecond)
-
-	_, cmd := sendMousePress(m, 0, 0)
-	if cmd != nil {
-		cmd()
-	}
-	if called {
-		t.Error("double-click outside all panes invoked breakPane; expected no call")
-	}
-}
-
-// TestSingleClickUpdatesCursor verifies that a single mouse press moves the
-// TUI cursor to the row corresponding to the clicked terminal coordinate.
-func TestSingleClickUpdatesCursor(t *testing.T) {
-	cfg := minimalConfig()
-	m := withWindowSize(New(cfg, "", nil, nil), 80, 24)
-
-	// Row 0 of the list starts at terminal row headerRows=2.
-	// Clicking terminal row 3 should move cursor to listIdx=1.
-	_, _ = sendMousePress(m, 5, 3)
-	m2, _ := sendMousePress(m, 5, 3)
-	// Cursor should be at index 1 (third terminal row = second list row).
-	wantCursor := 1
-	if m2.view.Cursor != wantCursor {
-		t.Errorf("after click at y=3: view.Cursor = %d; want %d", m2.view.Cursor, wantCursor)
 	}
 }

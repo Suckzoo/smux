@@ -88,15 +88,7 @@ func run(popup, smartOpen bool) error {
 // It creates SSH windows exactly once and then exits (closing the popup).
 // After a successful launch focus is moved to the new SSH window.
 func runPopup(cfg *config.Config) error {
-	var lastWindowID string
-	var paneLayouts []tmux.PaneLayout
-	if lastWindowID != "" {
-		if layouts, err := tmux.GetPaneLayouts(lastWindowID); err == nil {
-			paneLayouts = layouts
-		}
-	}
-
-	result, err := runTUI(cfg, lastWindowID, paneLayouts)
+	result, err := runTUI(cfg)
 	if err != nil {
 		return fmt.Errorf("TUI error: %w", err)
 	}
@@ -191,33 +183,13 @@ func runPersistent(cfg *config.Config) error {
 		os.Exit(0)
 	}()
 
-	// 9. Adopt any SSH windows from a previous smux run by querying the
-	//    @smux-managed window option. The last managed window becomes the
-	//    initial lastWindowID so the TUI can offer broadcast-toggle for it.
-	var lastWindowID string
-	if managed := tmux.GetManagedWindows(); len(managed) > 0 {
-		lastWindowID = managed[len(managed)-1]
-	}
-
 	// Closures for the quit-confirm dialog: count and kill non-smux windows.
 	countFn := func() int { return tmux.CountOtherWindows(smuxWindowID) }
 	killFn := func() error { return tmux.KillOtherWindows(smuxWindowID) }
 
-	// 10. Main loop: show TUI, create SSH window, switch to it, repeat.
-	// lastWindowID tracks the most recently created SSH window so the TUI can
-	// offer broadcast-toggle for that window and re-query pane layouts.
+	// 9. Main loop: show TUI, create SSH window, switch to it, repeat.
 	for {
-		// Re-query pane layouts fresh each TUI iteration. Silently use an empty
-		// slice if the window was closed or rearranged since last time.
-		var paneLayouts []tmux.PaneLayout
-		if lastWindowID != "" {
-			if layouts, lerr := tmux.GetPaneLayouts(lastWindowID); lerr == nil {
-				paneLayouts = layouts
-			}
-		}
-
-		result, err := runTUI(cfg, lastWindowID, paneLayouts,
-			tui.WithPersistentMode(countFn, killFn))
+		result, err := runTUI(cfg, tui.WithPersistentMode(countFn, killFn))
 		if err != nil {
 			return fmt.Errorf("TUI error: %w", err)
 		}
@@ -230,7 +202,6 @@ func runPersistent(cfg *config.Config) error {
 			fmt.Fprintf(os.Stderr, "smux: cannot create SSH window: %v\n", err)
 			// Continue — don't exit on a window creation failure.
 		} else {
-			lastWindowID = windowID
 			// Move smux to the leftmost position first, then switch focus to
 			// the SSH window. This avoids focus thrash: smux is repositioned
 			// silently while the user lands directly on their SSH sessions.
@@ -261,14 +232,9 @@ func resolvePopupKeybinding(cfg *config.Config) (key, mode string) {
 }
 
 // runTUI runs the bubbletea TUI and returns the user's selection or quit intent.
-// lastWindowID is the tmux window ID of the most recently created SSH window;
-// it is forwarded to the Model so the broadcast toggle key can toggle synchronize-panes on it.
-// paneLayouts is the freshly queried geometry of panes in the last SSH window,
-// used by the double-click handler to identify which pane was clicked.
 // opts are additional ModelOptions passed to tui.New (e.g. WithPersistentMode).
-func runTUI(cfg *config.Config, lastWindowID string, paneLayouts []tmux.PaneLayout, opts ...tui.ModelOption) (tui.Result, error) {
-	allOpts := append([]tui.ModelOption{tui.WithPaneLayouts(paneLayouts)}, opts...)
-	m := tui.New(cfg, lastWindowID, tmux.ToggleSynchronizePanes, tmux.BreakPane, allOpts...)
+func runTUI(cfg *config.Config, opts ...tui.ModelOption) (tui.Result, error) {
+	m := tui.New(cfg, opts...)
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	finalModel, err := p.Run()
 	if err != nil {

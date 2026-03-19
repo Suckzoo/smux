@@ -211,34 +211,6 @@ func TestCreateSSHWindowErrorIsHandled(t *testing.T) {
 	}
 }
 
-// TestLastWindowIDUpdatedOnSuccess verifies that when CreateSSHWindow succeeds,
-// main.go stores the returned window ID so the TUI can reference it for
-// broadcast-toggle operations in the next iteration.
-func TestLastWindowIDUpdatedOnSuccess(t *testing.T) {
-	src, err := os.ReadFile("main.go")
-	if err != nil {
-		t.Fatalf("cannot read main.go: %v", err)
-	}
-	content := string(src)
-
-	// lastWindowID must be declared and updated.
-	if !strings.Contains(content, "lastWindowID") {
-		t.Error("main.go does not declare a lastWindowID variable — window ID must be tracked across TUI iterations")
-	}
-
-	// The variable must be updated from the CreateSSHWindow return value.
-	// Look for an assignment like `lastWindowID = windowID` (or similar).
-	if !strings.Contains(content, "lastWindowID = ") {
-		t.Error("main.go does not assign to lastWindowID — must update it with the new window ID after each CreateSSHWindow call")
-	}
-
-	// lastWindowID must be forwarded to runTUI so the next TUI iteration has it.
-	// Accept any call where lastWindowID appears as an argument after cfg.
-	if !strings.Contains(content, "runTUI(cfg, lastWindowID") {
-		t.Error("main.go does not pass lastWindowID to runTUI — the window ID must be forwarded to each TUI iteration for broadcast-toggle support")
-	}
-}
-
 // ---------------------------------------------------------------------------
 // AC 15 Sub-AC 1 — Focus moves to SSH window after creation
 // ---------------------------------------------------------------------------

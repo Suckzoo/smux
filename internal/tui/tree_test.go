@@ -414,7 +414,7 @@ func TestModelFilterUpdatesListInRealTime(t *testing.T) {
 			},
 		},
 	}
-	m := New(cfg, "", nil, nil)
+	m := New(cfg)
 	m.view.Width = 80
 	m.view.Height = 24
 	m.viewport.Width = 80
@@ -455,7 +455,7 @@ func TestModelFilterUpdatesListInRealTime(t *testing.T) {
 // the filter and restores the full node list.
 func TestModelFilterResetsOnEsc(t *testing.T) {
 	cfg := makeTestConfig()
-	m := New(cfg, "", nil, nil)
+	m := New(cfg)
 	m.view.Width = 80
 	m.view.Height = 24
 	m.viewport.Width = 80
@@ -491,7 +491,7 @@ func TestModelFilterResetsOnEsc(t *testing.T) {
 // active (so the narrowed view persists for host selection).
 func TestModelFilterEnterConfirmsAndDeactivates(t *testing.T) {
 	cfg := makeTestConfig()
-	m := New(cfg, "", nil, nil)
+	m := New(cfg)
 	m.view.Width = 80
 	m.view.Height = 24
 	m.viewport.Width = 80
@@ -524,7 +524,7 @@ func TestModelFilterEnterConfirmsAndDeactivates(t *testing.T) {
 // parent-child hierarchy.
 func TestRenderListHostsAreIndented(t *testing.T) {
 	cfg := makeTestConfig()
-	m := New(cfg, "", nil, nil)
+	m := New(cfg)
 	// Set a known terminal size so View() doesn't bail out early.
 	m.view.Width = 80
 	m.view.Height = 24
@@ -559,7 +559,7 @@ func TestRenderListHostsAreIndented(t *testing.T) {
 // collapse/expand indicator character (▶ or ▼).
 func TestClusterNodeShowsArrow(t *testing.T) {
 	cfg := makeTestConfig()
-	m := New(cfg, "", nil, nil)
+	m := New(cfg)
 	m.view.Width = 80
 	m.view.Height = 24
 	m.viewport.Width = 80
@@ -584,7 +584,7 @@ func TestClusterNodeShowsArrow(t *testing.T) {
 // the view does not include host nodes for that cluster.
 func TestCollapsedClusterHidesHostsInRender(t *testing.T) {
 	cfg := makeTestConfig()
-	m := New(cfg, "", nil, nil)
+	m := New(cfg)
 	m.view.Width = 80
 	m.view.Height = 24
 	m.viewport.Width = 80
@@ -605,7 +605,7 @@ func TestCollapsedClusterHidesHostsInRender(t *testing.T) {
 // makes its host nodes appear in the flat list.
 func TestExpandedClusterShowsHostsInRender(t *testing.T) {
 	cfg := makeTestConfig()
-	m := New(cfg, "", nil, nil)
+	m := New(cfg)
 	m.view.Width = 80
 	m.view.Height = 24
 	m.viewport.Width = 80

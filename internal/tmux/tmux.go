@@ -227,8 +227,10 @@ func ConfigureMouseMode() {
 		"select-pane", "-t", "{mouse}",
 	).Run()
 
-	// Double click: focus the clicked pane and disable broadcast (sync-panes).
-	_ = exec.Command("tmux", "bind-key", "-T", "root", "DoubleClick1Pane",
+	// Ctrl+double-click: focus the clicked pane and disable broadcast.
+	// Using C-DoubleClick1Pane instead of DoubleClick1Pane avoids collision
+	// with tmux's default DoubleClick1Pane binding.
+	_ = exec.Command("tmux", "bind-key", "-T", "root", "C-DoubleClick1Pane",
 		"select-pane", "-t", "{mouse}",
 		";", "set-window-option", "synchronize-panes", "off",
 	).Run()
@@ -295,33 +297,6 @@ func SetSynchronizePanes(windowID string, on bool) error {
 		return fmt.Errorf("cannot set synchronize-panes %s: %w", value, err)
 	}
 	return nil
-}
-
-// GetSynchronizePanes queries the current synchronize-panes state for the
-// given tmux window target. Returns true when the option is "on".
-// An empty windowID queries the currently active window.
-func GetSynchronizePanes(windowID string) (bool, error) {
-	args := []string{"show-window-option", "-v"}
-	if windowID != "" {
-		args = append(args, "-t", windowID)
-	}
-	args = append(args, "synchronize-panes")
-	out, err := exec.Command("tmux", args...).Output()
-	if err != nil {
-		return false, fmt.Errorf("cannot query synchronize-panes: %w", err)
-	}
-	return strings.TrimSpace(string(out)) == "on", nil
-}
-
-// ToggleSynchronizePanes queries the current synchronize-panes state for the
-// given tmux window target and flips it (on→off, off→on).
-// An empty windowID operates on the currently active window.
-func ToggleSynchronizePanes(windowID string) error {
-	current, err := GetSynchronizePanes(windowID)
-	if err != nil {
-		return err
-	}
-	return SetSynchronizePanes(windowID, !current)
 }
 
 // buildSSHCommand constructs the SSH command string for a resolved host, including
@@ -438,26 +413,6 @@ func (s *RuntimeSession) KillAndRemovePane(paneID string) error {
 	return nil
 }
 
-// BreakAndRemovePane breaks the pane identified by paneID into a new tmux
-// window and removes it from the session's Panes slice, keeping the runtime
-// domain model consistent with the new tmux layout.
-//
-// This is the Go-callable counterpart of the DoubleClick1Pane tmux binding
-// configured by ConfigureMouseMode: when the user double-clicks a pane tmux
-// fires the native binding, but programmatic callers (e.g. tests or future
-// Go-level event handling) should use this method so that the RuntimeSession
-// accurately reflects how many panes remain in the original window.
-//
-// If the tmux break-pane command fails the pane is NOT removed from Panes, so
-// the caller can retry or surface the error.
-func (s *RuntimeSession) BreakAndRemovePane(paneID string) error {
-	if err := BreakPane(paneID); err != nil {
-		return err
-	}
-	s.RemovePane(paneID)
-	return nil
-}
-
 // KillPane executes "tmux kill-pane -t <paneID>" to destroy the specified pane.
 // An empty paneID targets the currently active pane (tmux default behaviour).
 // This function does not update any in-memory runtime state; use
@@ -487,78 +442,6 @@ func NewRuntimeSession(windowID string, paneIDs []string, hosts []config.Resolve
 		panes = append(panes, &RuntimePane{PaneID: pid, Host: host, State: PaneStateConnected})
 	}
 	return &RuntimeSession{WindowID: windowID, Panes: panes}
-}
-
-// ---------------------------------------------------------------------------
-// Pane layout geometry — used for mouse click → pane identification
-// ---------------------------------------------------------------------------
-
-// PaneLayout describes the geometry of a single tmux pane within a window.
-// X and Y are the terminal column and row of the pane's top-left corner, and
-// Width/Height are its dimensions in columns/rows.
-//
-// PaneLayouts are obtained from a live tmux session via GetPaneLayouts and
-// are passed to the TUI so that double-click coordinates can be mapped to a
-// specific pane ID.
-type PaneLayout struct {
-	PaneID string // tmux pane identifier, e.g. "%1"
-	X      int    // left column of the pane (0-based)
-	Y      int    // top row of the pane (0-based)
-	Width  int    // width in columns
-	Height int    // height in rows
-}
-
-// GetPaneLayouts queries the current geometry of all panes in the given tmux
-// window and returns a slice of PaneLayout describing each pane's position and
-// size. An empty windowID targets the currently active window.
-func GetPaneLayouts(windowID string) ([]PaneLayout, error) {
-	const format = "#{pane_id} #{pane_left} #{pane_top} #{pane_width} #{pane_height}"
-	args := []string{"list-panes", "-F", format}
-	if windowID != "" {
-		args = []string{"list-panes", "-t", windowID, "-F", format}
-	}
-	out, err := exec.Command("tmux", args...).Output()
-	if err != nil {
-		return nil, fmt.Errorf("cannot list pane layouts for window %q: %w", windowID, err)
-	}
-	return parsePaneLayouts(strings.TrimSpace(string(out)))
-}
-
-// parsePaneLayouts parses the output of "tmux list-panes -F '#{pane_id}
-// #{pane_left} #{pane_top} #{pane_width} #{pane_height}'" into a slice of
-// PaneLayout structs. Each non-empty line must contain exactly five
-// space-delimited fields.
-func parsePaneLayouts(output string) ([]PaneLayout, error) {
-	var layouts []PaneLayout
-	for _, line := range strings.Split(output, "\n") {
-		if line == "" {
-			continue
-		}
-		var p PaneLayout
-		_, err := fmt.Sscanf(line, "%s %d %d %d %d",
-			&p.PaneID, &p.X, &p.Y, &p.Width, &p.Height)
-		if err != nil {
-			return nil, fmt.Errorf("cannot parse pane layout line %q: %w", line, err)
-		}
-		layouts = append(layouts, p)
-	}
-	return layouts, nil
-}
-
-// BreakPane moves the specified tmux pane to a new window using tmux break-pane.
-// paneID must be a valid tmux pane target (e.g. "%1", or a window.pane pair
-// like "@2.%3"). After calling BreakPane the pane is no longer part of its
-// original window, so synchronize-panes in the origin window will not affect it.
-// An empty paneID targets the currently active pane.
-func BreakPane(paneID string) error {
-	args := []string{"break-pane"}
-	if paneID != "" {
-		args = append(args, "-t", paneID)
-	}
-	if err := exec.Command("tmux", args...).Run(); err != nil {
-		return fmt.Errorf("cannot break pane %q to new window: %w", paneID, err)
-	}
-	return nil
 }
 
 func sendKeysToTarget(target, cmd string) error {

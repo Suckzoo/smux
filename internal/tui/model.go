@@ -3,7 +3,6 @@ package tui
 import (
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -11,7 +10,6 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/Suckzoo/smux/internal/config"
-	"github.com/Suckzoo/smux/internal/tmux"
 )
 
 // Result is what the TUI returns after the user confirms a selection.
@@ -20,16 +18,6 @@ type Result struct {
 	Hosts []config.ResolvedHost
 	// Quit is true when the user pressed q or Ctrl+C.
 	Quit bool
-}
-
-// BreakPaneMsg is emitted when the user presses the break-pane key (M-a)
-// while a previously created SSH window exists. The Update loop handles this
-// message by invoking the breakPane callback, which calls `tmux break-pane`
-// to detach the focused SSH pane into its own window.
-type BreakPaneMsg struct {
-	// WindowID is the tmux window ID of the SSH window whose active pane
-	// should be broken out into a new window.
-	WindowID string
 }
 
 // Model is the bubbletea model for the host-selection TUI.
@@ -60,24 +48,6 @@ type Model struct {
 	filterInput textinput.Model // UI component — not a domain concern
 	viewport    viewport.Model  // UI component — not a domain concern
 
-	// lastWindowID is the tmux window ID of the most recently created SSH
-	// window. It is used by the M-b broadcast-toggle binding to target the
-	// correct window while the TUI is active.
-	lastWindowID string
-
-	// toggleBroadcast is called when the user presses the broadcast-toggle key
-	// (default M-b). It receives the last known SSH window ID. A nil function
-	// means the binding is inactive (no SSH window created yet).
-	toggleBroadcast func(windowID string) error
-
-	// breakPane is called when the user presses the break-pane key (default
-	// M-a) or when a double-click identifies a specific pane to break. When
-	// triggered from M-a it receives the last SSH window ID so tmux breaks
-	// the focused pane of that window. When triggered by a double-click it
-	// receives the specific pane ID identified by click coordinates.
-	// A nil function means the binding is inactive.
-	breakPane func(paneID string) error
-
 	// persistent enables the quit-confirmation flow: pressing 'q' in
 	// BrowsingPhase transitions to QuitConfirmingPhase instead of exiting
 	// immediately. Only set true when smux is running as the long-lived
@@ -94,40 +64,14 @@ type Model struct {
 	// TUI exits. Ignored when persistent is false.
 	killManagedWindows func() error
 
-	// paneLayouts holds the geometry (position + size) of each SSH pane in the
-	// most recently created tmux window. Used by the mouse double-click handler
-	// to identify which tmux pane was clicked based on terminal coordinates.
-	paneLayouts []tmux.PaneLayout
-
-	// lastClickTime, lastClickX, lastClickY track the position and time of the
-	// most recent left-button mouse press for double-click detection.
-	lastClickTime time.Time
-	lastClickX    int
-	lastClickY    int
-
 	// Returned after the user confirms a selection or quits.
 	done   bool
 	result Result
 }
 
-// doubleClickWindow is the maximum elapsed time between two mouse press events
-// at the same location for them to be considered a double-click.
-const doubleClickWindow = 300 * time.Millisecond
-
-// doubleClickRadius is the maximum distance (in terminal cells) between two
-// mouse presses for them to be treated as a double-click on the same target.
-const doubleClickRadius = 1
-
 // ModelOption is a functional option for configuring a Model at construction
 // time without changing New()'s required parameter list.
 type ModelOption func(*Model)
-
-// WithPaneLayouts supplies the current tmux pane geometry to the model so that
-// the mouse double-click handler can map terminal coordinates to a pane ID.
-// Obtain layouts via tmux.GetPaneLayouts after calling tmux.CreateSSHWindow.
-func WithPaneLayouts(layouts []tmux.PaneLayout) ModelOption {
-	return func(m *Model) { m.paneLayouts = layouts }
-}
 
 // WithPersistentMode enables the quit-confirmation dialog for long-lived smux
 // processes. When active, pressing 'q' in BrowsingPhase transitions to
@@ -160,34 +104,9 @@ func hostKey(r config.ResolvedHost) string {
 // New creates a fresh Model from the given config.
 // All clusters start expanded and no hosts are selected.
 //
-// lastWindowID is the tmux window ID of the most recently created SSH window,
-// used by the M-b broadcast-toggle and M-a break-pane bindings
-// (pass "" if no window exists yet).
-//
-// toggleBroadcast is an optional callback invoked when the user presses the
-// broadcast-toggle key (M-b). It receives the last SSH window ID. Pass nil to
-// make the binding a no-op until an SSH window has been created.
-//
-// breakPane is an optional callback invoked when the user presses the
-// break-pane key (M-a). It receives the last SSH window ID. Pass nil to
-// make the binding a no-op until an SSH window has been created.
-// New creates a fresh Model from the given config.
-// All clusters start expanded and no hosts are selected.
-//
-// lastWindowID is the tmux window ID of the most recently created SSH window,
-// used by the M-b broadcast-toggle and M-a break-pane bindings
-// (pass "" if no window exists yet).
-//
-// toggleBroadcast is an optional callback invoked when the user presses the
-// broadcast-toggle key (M-b). It receives the last SSH window ID. Pass nil to
-// make the binding a no-op until an SSH window has been created.
-//
-// breakPane is an optional callback invoked when the user presses the
-// break-pane key (M-a) or double-clicks a pane. Pass nil to disable.
-//
-// opts are optional ModelOption values (e.g. WithPaneLayouts) that configure
-// additional model behaviour without changing the required parameter list.
-func New(cfg *config.Config, lastWindowID string, toggleBroadcast func(string) error, breakPane func(string) error, opts ...ModelOption) Model {
+// opts are optional ModelOption values (e.g. WithPersistentMode) that
+// configure additional model behaviour without changing the required parameter list.
+func New(cfg *config.Config, opts ...ModelOption) Model {
 	ti := textinput.New()
 	ti.Placeholder = "filter hosts..."
 	ti.CharLimit = 64
@@ -204,11 +123,8 @@ func New(cfg *config.Config, lastWindowID string, toggleBroadcast func(string) e
 			Selected: make(map[string]bool),
 		},
 		// view is zero-valued; Width/Height are set by the first WindowSizeMsg.
-		filterInput:     ti,
-		viewport:        vp,
-		lastWindowID:    lastWindowID,
-		toggleBroadcast: toggleBroadcast,
-		breakPane:       breakPane,
+		filterInput: ti,
+		viewport:    vp,
 	}
 	for _, opt := range opts {
 		opt(&m)
@@ -259,18 +175,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
-
-	case tea.MouseMsg:
-		return m.handleMouse(msg)
-
-	case BreakPaneMsg:
-		// Execute the tmux break-pane action for the SSH window identified by
-		// the message. The error is intentionally ignored so that a failing
-		// break-pane does not crash or otherwise disrupt the TUI.
-		if m.breakPane != nil && msg.WindowID != "" {
-			_ = m.breakPane(msg.WindowID)
-		}
-		return m, nil
 	}
 
 	if m.isFilterActive() {
@@ -334,29 +238,6 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		m.done = true
 		m.result = Result{Quit: true}
 		return m, tea.Quit
-
-	case "alt+b":
-		// Toggle synchronize-panes for the most recently created SSH window.
-		// This lets the user toggle broadcast mode without leaving the TUI.
-		if m.toggleBroadcast != nil && m.lastWindowID != "" {
-			fn := m.toggleBroadcast
-			id := m.lastWindowID
-			return m, func() tea.Msg {
-				_ = fn(id)
-				return nil
-			}
-		}
-
-	case "alt+a":
-		// Break the focused pane of the most recently created SSH window into
-		// its own tmux window. Emits BreakPaneMsg so the update loop can
-		// handle the tmux action asynchronously.
-		if m.lastWindowID != "" {
-			id := m.lastWindowID
-			return m, func() tea.Msg {
-				return BreakPaneMsg{WindowID: id}
-			}
-		}
 
 	case "/":
 		m.state.Phase = SelectingPhase{}
@@ -784,71 +665,3 @@ func max(a, b int) int {
 	}
 	return b
 }
-
-// handleMouse processes a bubbletea mouse event. Only left-button presses are
-// considered. Two presses at the same location within doubleClickWindow are
-// treated as a double-click: the pane at the click coordinates is identified
-// via the stored pane layout geometry and the breakPane callback is invoked
-// with that pane's ID. A single click moves the TUI cursor to the clicked row.
-func (m Model) handleMouse(msg tea.MouseMsg) (Model, tea.Cmd) {
-	// Only handle left-button presses; ignore releases, motion, wheel, etc.
-	if msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft {
-		return m, nil
-	}
-
-	now := time.Now()
-	isDoubleClick := !m.lastClickTime.IsZero() &&
-		now.Sub(m.lastClickTime) <= doubleClickWindow &&
-		absInt(msg.X-m.lastClickX) <= doubleClickRadius &&
-		absInt(msg.Y-m.lastClickY) <= doubleClickRadius
-
-	// Update click-tracking state for next event.
-	m.lastClickTime = now
-	m.lastClickX = msg.X
-	m.lastClickY = msg.Y
-
-	// Single click: move cursor to clicked row (rows 0–1 are header rows).
-	const headerRows = 2
-	listIdx := msg.Y - headerRows + m.viewport.YOffset
-	if listIdx >= 0 && listIdx < len(m.flatNodes) {
-		m.view.Cursor = listIdx
-		m.clampViewport()
-	}
-
-	if !isDoubleClick || m.breakPane == nil || len(m.paneLayouts) == 0 {
-		return m, nil
-	}
-
-	// Double-click with pane layout data: identify which tmux pane was clicked
-	// and invoke breakPane asynchronously so the TUI remains responsive.
-	paneID := m.findPaneAt(msg.X, msg.Y)
-	if paneID == "" {
-		return m, nil
-	}
-	fn := m.breakPane
-	return m, func() tea.Msg {
-		_ = fn(paneID)
-		return nil
-	}
-}
-
-// findPaneAt returns the PaneID of the first PaneLayout whose rectangle
-// contains the terminal coordinate (x, y). Returns "" if no pane covers the
-// point.
-func (m Model) findPaneAt(x, y int) string {
-	for _, p := range m.paneLayouts {
-		if x >= p.X && x < p.X+p.Width && y >= p.Y && y < p.Y+p.Height {
-			return p.PaneID
-		}
-	}
-	return ""
-}
-
-// absInt returns the absolute value of n.
-func absInt(n int) int {
-	if n < 0 {
-		return -n
-	}
-	return n
-}
-
