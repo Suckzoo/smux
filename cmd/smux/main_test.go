@@ -451,3 +451,55 @@ func TestMissingConfigMessageSourceInspection(t *testing.T) {
 		t.Error("main.go does not reference config.ExampleConfig — the missing-config message must include the YAML format example")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Sub-AC 1 of distribute-file AC — dirty-state startup loading
+// ---------------------------------------------------------------------------
+
+// TestDirtyStateLoadedOnStartup is a source-inspection test that verifies
+// main.go calls the warnDirtyState helper (which loads dirty-state from disk)
+// during startup, so users are warned about leftover temporary SSH keys from
+// previous distribute-file operations.
+func TestDirtyStateLoadedOnStartup(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("cannot read main.go: %v", err)
+	}
+	content := string(src)
+
+	// warnDirtyState must be defined.
+	if !strings.Contains(content, "func warnDirtyState()") {
+		t.Error("main.go does not define warnDirtyState() — dirty-state must be loaded on startup")
+	}
+
+	// warnDirtyState must be called (from runPersistent or run).
+	if !strings.Contains(content, "warnDirtyState()") {
+		t.Error("main.go does not call warnDirtyState() — dirty-state must be loaded on startup")
+	}
+
+	// dirtystate.Load must be referenced inside warnDirtyState.
+	if !strings.Contains(content, "dirtystate.Load()") {
+		t.Error("main.go does not call dirtystate.Load() — dirty-state must be loaded on startup")
+	}
+}
+
+// TestDirtyStateWarnIncludesHostInfo is a source-inspection test verifying
+// that when dirty hosts are present, warnDirtyState prints the host address,
+// key comment, and timestamp so the user has enough context to investigate.
+func TestDirtyStateWarnIncludesHostInfo(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("cannot read main.go: %v", err)
+	}
+	content := string(src)
+
+	// The warning must reference h.KeyComment to show the key identifier.
+	if !strings.Contains(content, "h.KeyComment") {
+		t.Error("warnDirtyState must include h.KeyComment in the warning output so users can identify the leftover key")
+	}
+
+	// The warning must reference h.AddedAt to show when the key was created.
+	if !strings.Contains(content, "h.AddedAt") {
+		t.Error("warnDirtyState must include h.AddedAt in the warning output so users know when the key was distributed")
+	}
+}

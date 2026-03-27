@@ -4,10 +4,12 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/Suckzoo/smux/internal/config"
+	"github.com/Suckzoo/smux/internal/dirtystate"
 )
 
 // minimalConfig returns a small *config.Config suitable for TUI unit tests.
@@ -21,6 +23,14 @@ func minimalConfig() *config.Config {
 				},
 			},
 		},
+	}
+}
+
+// emptyConfig returns a *config.Config with no clusters, used to test edge
+// cases where the host list is empty.
+func emptyConfig() *config.Config {
+	return &config.Config{
+		Clusters: map[string]config.ClusterConfig{},
 	}
 }
 
@@ -1374,6 +1384,399 @@ func TestSelectionsNotCarriedBetweenTUIIterations(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Sub-AC 1 – multi-select support for dirty hosts + combined visual indicators
+// ---------------------------------------------------------------------------
+
+// TestDirtyHostIsSelectableWithSpace verifies that a dirty host (one with
+// pending SSH key cleanup) can be selected via the Space key just like any
+// other host. The dirty state must not prevent selection.
+func TestDirtyHostIsSelectableWithSpace(t *testing.T) {
+	cfg := &config.Config{
+		Clusters: map[string]config.ClusterConfig{
+			"prod": {
+				Hosts: []config.HostEntry{
+					{Name: "host-01", Provenance: config.ProvenanceFull},
+				},
+			},
+		},
+	}
+	// Mark host-01 as dirty.
+	dirtySet := map[string]bool{"host-01": true}
+	m := withWindowSize(New(cfg, WithDirtyHosts(dirtySet)), 80, 24)
+
+	// Find host-01 in the flat list and select it.
+	hostIdx := -1
+	for i, node := range m.flatNodes {
+		if node.IsHost() && node.Host != nil && node.Host.Host == "host-01" {
+			hostIdx = i
+			break
+		}
+	}
+	if hostIdx < 0 {
+		t.Fatal("host-01 not found in flat list")
+	}
+
+	m.view.Cursor = hostIdx
+	m, _ = sendKey(m, " ")
+
+	hosts := m.selectedHosts()
+	if len(hosts) != 1 {
+		t.Fatalf("expected 1 selected host after Space on dirty host, got %d", len(hosts))
+	}
+	if hosts[0].Host != "host-01" {
+		t.Errorf("selected host = %q, want host-01", hosts[0].Host)
+	}
+}
+
+// TestDirtySelectedHostShowsWarningGlyph verifies that a host which is both
+// selected AND dirty still displays the ⚠ warning glyph in the inventory row.
+// The glyph must be visible regardless of selection state, so the user always
+// knows which hosts have pending cleanup work.
+func TestDirtySelectedHostShowsWarningGlyph(t *testing.T) {
+	cfg := &config.Config{
+		Clusters: map[string]config.ClusterConfig{
+			"prod": {
+				Hosts: []config.HostEntry{
+					{Name: "host-01", Provenance: config.ProvenanceFull},
+				},
+			},
+		},
+	}
+	dirtySet := map[string]bool{"host-01": true}
+	m := withWindowSize(New(cfg, WithDirtyHosts(dirtySet)), 80, 24)
+
+	// Select host-01 (it is also dirty).
+	hostIdx := -1
+	for i, node := range m.flatNodes {
+		if node.IsHost() && node.Host != nil && node.Host.Host == "host-01" {
+			hostIdx = i
+			break
+		}
+	}
+	if hostIdx < 0 {
+		t.Fatal("host-01 not found in flat list")
+	}
+	m.view.Cursor = hostIdx
+	m, _ = sendKey(m, " ")
+
+	// Verify it is selected.
+	if len(m.selectedHosts()) != 1 {
+		t.Fatal("host-01 should be selected")
+	}
+
+	// Verify the ⚠ glyph is present in the rendered row for host-01.
+	lines := m.renderList()
+	found := false
+	for _, line := range lines {
+		if strings.Contains(line, "host-01") && strings.Contains(line, "⚠") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("selected+dirty host-01 should render with ⚠ glyph; lines: %v", lines)
+	}
+}
+
+// TestDirtySelectedHostShowsCheckbox verifies that a dirty host which is also
+// selected renders the [✓] checkbox (selection indicator), so the user can
+// clearly see both the selection state and the dirty state at a glance.
+func TestDirtySelectedHostShowsCheckbox(t *testing.T) {
+	cfg := &config.Config{
+		Clusters: map[string]config.ClusterConfig{
+			"prod": {
+				Hosts: []config.HostEntry{
+					{Name: "host-01", Provenance: config.ProvenanceFull},
+				},
+			},
+		},
+	}
+	dirtySet := map[string]bool{"host-01": true}
+	m := withWindowSize(New(cfg, WithDirtyHosts(dirtySet)), 80, 24)
+
+	// Select host-01.
+	hostIdx := -1
+	for i, node := range m.flatNodes {
+		if node.IsHost() {
+			hostIdx = i
+			break
+		}
+	}
+	if hostIdx < 0 {
+		t.Fatal("no host node found")
+	}
+	m.view.Cursor = hostIdx
+	m, _ = sendKey(m, " ")
+
+	lines := m.renderList()
+	found := false
+	for _, line := range lines {
+		if strings.Contains(line, "host-01") && strings.Contains(line, "✓") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("selected dirty host-01 should render with [✓] checkbox; lines: %v", lines)
+	}
+}
+
+// TestClusterSpaceSelectsDirtyHosts verifies that pressing Space on a cluster
+// header selects ALL hosts in the cluster including dirty ones.
+func TestClusterSpaceSelectsDirtyHosts(t *testing.T) {
+	cfg := &config.Config{
+		Clusters: map[string]config.ClusterConfig{
+			"prod": {
+				Hosts: []config.HostEntry{
+					{Name: "host-01", Provenance: config.ProvenanceFull},
+					{Name: "host-02", Provenance: config.ProvenanceFull},
+				},
+			},
+		},
+	}
+	// Mark host-01 as dirty; host-02 is clean.
+	dirtySet := map[string]bool{"host-01": true}
+	m := withWindowSize(New(cfg, WithDirtyHosts(dirtySet)), 80, 24)
+
+	// Space on the cluster header should select both hosts including the dirty one.
+	m.view.Cursor = 0 // cluster header node
+	m, _ = sendKey(m, " ")
+
+	hosts := m.selectedHosts()
+	if len(hosts) != 2 {
+		t.Errorf("Space on cluster should select all 2 hosts (including dirty), got %d", len(hosts))
+	}
+
+	// Verify host-01 (dirty) is among the selected.
+	dirty01Selected := false
+	for _, h := range hosts {
+		if h.Host == "host-01" {
+			dirty01Selected = true
+			break
+		}
+	}
+	if !dirty01Selected {
+		t.Error("dirty host-01 should be selected after Space on cluster header")
+	}
+}
+
+// TestMultipleDirtyHostsAllSelectable verifies that a cluster where all hosts
+// are dirty can still have all of them selected simultaneously.
+func TestMultipleDirtyHostsAllSelectable(t *testing.T) {
+	cfg := &config.Config{
+		Clusters: map[string]config.ClusterConfig{
+			"prod": {
+				Hosts: []config.HostEntry{
+					{Name: "host-01", Provenance: config.ProvenanceFull},
+					{Name: "host-02", Provenance: config.ProvenanceFull},
+					{Name: "host-03", Provenance: config.ProvenanceFull},
+				},
+			},
+		},
+	}
+	// All three hosts are dirty.
+	dirtySet := map[string]bool{
+		"host-01": true,
+		"host-02": true,
+		"host-03": true,
+	}
+	m := withWindowSize(New(cfg, WithDirtyHosts(dirtySet)), 80, 24)
+
+	// Select all via cluster header.
+	m.view.Cursor = 0
+	m, _ = sendKey(m, " ")
+
+	hosts := m.selectedHosts()
+	if len(hosts) != 3 {
+		t.Errorf("all 3 dirty hosts should be selectable; got %d selected", len(hosts))
+	}
+
+	// All rendered rows for hosts should show both ⚠ and ✓.
+	lines := m.renderList()
+	for _, hostName := range []string{"host-01", "host-02", "host-03"} {
+		foundGlyph := false
+		foundCheck := false
+		for _, line := range lines {
+			if strings.Contains(line, hostName) {
+				if strings.Contains(line, "⚠") {
+					foundGlyph = true
+				}
+				if strings.Contains(line, "✓") {
+					foundCheck = true
+				}
+			}
+		}
+		if !foundGlyph {
+			t.Errorf("dirty+selected %s should show ⚠ glyph", hostName)
+		}
+		if !foundCheck {
+			t.Errorf("dirty+selected %s should show ✓ checkbox", hostName)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Dirty-state inventory marker tests
+// ---------------------------------------------------------------------------
+
+// dirtyConfig returns a config with two hosts whose SSH addresses (ResolvedHost.Host)
+// are "host-01" and "host-02" (HostEntry.Name is used as the SSH address by Resolve).
+func dirtyConfig() *config.Config {
+	return &config.Config{
+		Clusters: map[string]config.ClusterConfig{
+			"prod": {
+				Hosts: []config.HostEntry{
+					{Name: "host-01", Provenance: config.ProvenanceFull},
+					{Name: "host-02", Provenance: config.ProvenanceFull},
+				},
+			},
+		},
+	}
+}
+
+// TestDirtyHostRendersWarningGlyph verifies that a host flagged as dirty in
+// the model's dirtyHosts map is rendered with the ⚠ warning glyph in the
+// inventory list.
+//
+// HostEntry.Name doubles as the SSH address (ResolvedHost.Host) per the
+// Resolve() contract, so "host-01" is both the display name and the SSH address.
+func TestDirtyHostRendersWarningGlyph(t *testing.T) {
+	cfg := dirtyConfig()
+	// "host-01" is both the display name and the SSH address for this host entry.
+	dirtySet := map[string]bool{"host-01": true}
+	m := withWindowSize(New(cfg, WithDirtyHosts(dirtySet)), 80, 24)
+
+	lines := m.renderList()
+	// Expect at least: cluster header + 2 host rows.
+	if len(lines) < 3 {
+		t.Fatalf("expected at least 3 rendered lines, got %d", len(lines))
+	}
+
+	found := false
+	for _, line := range lines {
+		if strings.Contains(line, "⚠") && strings.Contains(line, "host-01") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("dirty host-01 should render with ⚠ glyph in inventory view; lines: %v", lines)
+	}
+}
+
+// TestCleanHostDoesNotRenderWarningGlyph verifies that a host NOT flagged as
+// dirty is never rendered with the ⚠ glyph.
+func TestCleanHostDoesNotRenderWarningGlyph(t *testing.T) {
+	cfg := dirtyConfig()
+	// Only host-01 is dirty; host-02 is clean.
+	dirtySet := map[string]bool{"host-01": true}
+	m := withWindowSize(New(cfg, WithDirtyHosts(dirtySet)), 80, 24)
+
+	lines := m.renderList()
+	for _, line := range lines {
+		if strings.Contains(line, "host-02") && strings.Contains(line, "⚠") {
+			t.Errorf("clean host-02 must not render with ⚠ glyph; line: %q", line)
+		}
+	}
+}
+
+// TestNoDirtyHostsNoWarningGlyph verifies that when no hosts are dirty the ⚠
+// glyph never appears in any inventory row.
+func TestNoDirtyHostsNoWarningGlyph(t *testing.T) {
+	cfg := dirtyConfig()
+	m := withWindowSize(New(cfg, WithDirtyHosts(map[string]bool{})), 80, 24)
+
+	lines := m.renderList()
+	for _, line := range lines {
+		if strings.Contains(line, "⚠") {
+			t.Errorf("no dirty hosts set, but ⚠ appeared in line: %q", line)
+		}
+	}
+}
+
+// TestDirtyStatusBarLegendPresent verifies that the status bar includes the
+// dirty-state legend message when dirty hosts are present.
+func TestDirtyStatusBarLegendPresent(t *testing.T) {
+	cfg := dirtyConfig()
+	dirtySet := map[string]bool{"host-01": true}
+	m := withWindowSize(New(cfg, WithDirtyHosts(dirtySet)), 80, 24)
+
+	view := m.View()
+	if !strings.Contains(view, "need key cleanup") {
+		t.Error("status bar should contain 'need key cleanup' legend when dirty hosts are present")
+	}
+	if !strings.Contains(view, "⚠") {
+		t.Error("status bar should contain ⚠ glyph in legend when dirty hosts are present")
+	}
+}
+
+// TestCleanStatusBarNoLegend verifies that the status bar does NOT include
+// the dirty-state legend when no hosts are dirty.
+func TestCleanStatusBarNoLegend(t *testing.T) {
+	cfg := dirtyConfig()
+	m := withWindowSize(New(cfg, WithDirtyHosts(map[string]bool{})), 80, 24)
+
+	view := m.View()
+	if strings.Contains(view, "need key cleanup") {
+		t.Error("status bar must not contain dirty legend when no hosts are dirty")
+	}
+}
+
+// TestDirtyHostCountInLegend verifies that the legend displays the correct
+// count of dirty hosts.
+func TestDirtyHostCountInLegend(t *testing.T) {
+	cfg := dirtyConfig()
+	dirtySet := map[string]bool{"host-01": true, "host-02": true}
+	m := withWindowSize(New(cfg, WithDirtyHosts(dirtySet)), 80, 24)
+
+	view := m.View()
+	if !strings.Contains(view, "2 host(s) need key cleanup") {
+		t.Errorf("status bar legend should mention '2 host(s) need key cleanup', got view:\n%s", view)
+	}
+}
+
+// TestDirtyHostWarningGlyphOnCursorRow verifies that even when the cursor is
+// positioned on a dirty host the ⚠ glyph is visible in the rendered line.
+func TestDirtyHostWarningGlyphOnCursorRow(t *testing.T) {
+	cfg := dirtyConfig()
+	dirtySet := map[string]bool{"host-01": true}
+	m := withWindowSize(New(cfg, WithDirtyHosts(dirtySet)), 80, 24)
+
+	// Navigate to host-01 (index 1 in flat list: cluster header=0, host-01=1).
+	m.view.Cursor = 1
+	lines := m.renderList()
+
+	if len(lines) < 2 {
+		t.Fatal("expected at least 2 rendered lines")
+	}
+	cursorLine := lines[1]
+	if !strings.Contains(cursorLine, "⚠") {
+		t.Errorf("cursor row on dirty host-01 should still display ⚠ glyph; got: %q", cursorLine)
+	}
+}
+
+// TestWithDirtyHostsOption verifies that WithDirtyHosts correctly overrides
+// the auto-loaded dirty state, making it possible to test marker rendering
+// without touching ~/.smux/dirty-state.json.
+func TestWithDirtyHostsOption(t *testing.T) {
+	cfg := dirtyConfig()
+
+	// Create two models: one with dirty overrides, one without.
+	mDirty := New(cfg, WithDirtyHosts(map[string]bool{"host-01": true}))
+	mClean := New(cfg, WithDirtyHosts(map[string]bool{}))
+
+	if !mDirty.dirtyHosts["host-01"] {
+		t.Error("WithDirtyHosts: expected host-01 to be marked dirty")
+	}
+	if mDirty.dirtyHosts["host-02"] {
+		t.Error("WithDirtyHosts: host-02 should not be dirty")
+	}
+	if len(mClean.dirtyHosts) != 0 {
+		t.Errorf("WithDirtyHosts(empty): expected no dirty hosts, got %d", len(mClean.dirtyHosts))
+	}
+}
+
 // TestNewModelCursorStartsAtZero verifies that every fresh TUI model positions
 // the cursor at row 0 so that focus is always at the top of the host tree when
 // looping back — not wherever it was before the previous iteration ended.
@@ -1393,5 +1796,746 @@ func TestNewModelCursorStartsAtZero(t *testing.T) {
 	if m2.view.Cursor != 0 {
 		t.Errorf("new TUI model view.Cursor = %d; want 0 (fresh TUI must reset cursor to top)",
 			m2.view.Cursor)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Sub-AC 2 – Startup dirty-state warning dialog
+// ---------------------------------------------------------------------------
+
+// makeDirtyState is a test helper that builds a *dirtystate.State from a
+// slice of (host, keyComment) pairs.  AddedAt is set to a fixed timestamp so
+// tests are deterministic.
+func makeDirtyState(pairs ...string) *dirtystate.State {
+	if len(pairs)%2 != 0 {
+		panic("makeDirtyState: pairs must have even length (host, keyComment)")
+	}
+	s := &dirtystate.State{}
+	for i := 0; i < len(pairs); i += 2 {
+		s.Add(dirtystate.DirtyHost{
+			Host:       pairs[i],
+			KeyComment: pairs[i+1],
+			AddedAt:    time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		})
+	}
+	return s
+}
+
+// TestDirtyStateWarningPhaseActivatedOnStartup verifies that injecting a
+// non-empty dirty state via WithDirtyState causes the model to start in
+// DirtyStateWarningPhase rather than BrowsingPhase.
+func TestDirtyStateWarningPhaseActivatedOnStartup(t *testing.T) {
+	cfg := dirtyConfig()
+	ds := makeDirtyState("host-01", "smux-distribute-abc123")
+	m := New(cfg, WithDirtyState(ds))
+
+	if _, ok := m.state.Phase.(DirtyStateWarningPhase); !ok {
+		t.Errorf("expected DirtyStateWarningPhase when non-empty dirty state is injected; got %T",
+			m.state.Phase)
+	}
+}
+
+// TestDirtyStateWarningPhaseNotShownWhenClean verifies that an empty dirty
+// state does NOT trigger the warning dialog: the initial phase is BrowsingPhase.
+func TestDirtyStateWarningPhaseNotShownWhenClean(t *testing.T) {
+	cfg := dirtyConfig()
+	ds := &dirtystate.State{} // empty
+	m := New(cfg, WithDirtyState(ds))
+
+	if _, ok := m.state.Phase.(BrowsingPhase); !ok {
+		t.Errorf("expected BrowsingPhase for empty dirty state; got %T", m.state.Phase)
+	}
+}
+
+// TestDirtyStateWarningViewContainsHosts verifies that the warning dialog view
+// includes the SSH addresses of every dirty host.
+func TestDirtyStateWarningViewContainsHosts(t *testing.T) {
+	cfg := dirtyConfig()
+	ds := makeDirtyState("host-01", "smux-distribute-abc", "host-02", "smux-distribute-xyz")
+	m := withWindowSize(New(cfg, WithDirtyState(ds)), 120, 40)
+
+	view := m.View()
+
+	if !strings.Contains(view, "host-01") {
+		t.Error("dirty-state warning view should list host-01")
+	}
+	if !strings.Contains(view, "host-02") {
+		t.Error("dirty-state warning view should list host-02")
+	}
+}
+
+// TestDirtyStateWarningViewContainsKeyComment verifies that the key comment
+// (the unique identifier for the temporary SSH key) is visible in the warning
+// dialog for spoke-type dirty records.
+func TestDirtyStateWarningViewContainsKeyComment(t *testing.T) {
+	cfg := dirtyConfig()
+	ds := makeDirtyState("host-01", "smux-distribute-abc123ef")
+	m := withWindowSize(New(cfg, WithDirtyState(ds)), 120, 40)
+
+	view := m.View()
+	if !strings.Contains(view, "smux-distribute-abc123ef") {
+		t.Error("dirty-state warning view should display the key comment for spoke records")
+	}
+}
+
+// TestDirtyStateWarningViewShowsHubKeyDir verifies that hub-type dirty records
+// (HubKeyDir != "") show the remote directory path instead of a key comment.
+func TestDirtyStateWarningViewShowsHubKeyDir(t *testing.T) {
+	cfg := dirtyConfig()
+	ds := &dirtystate.State{}
+	ds.Add(dirtystate.DirtyHost{
+		Host:       "hub-01",
+		KeyComment: "smux-distribute-hub123",
+		HubKeyDir:  "/tmp/smux-distribute-ABCDEF",
+		AddedAt:    time.Now(),
+	})
+	m := withWindowSize(New(cfg, WithDirtyState(ds)), 120, 40)
+
+	view := m.View()
+	if !strings.Contains(view, "/tmp/smux-distribute-ABCDEF") {
+		t.Error("dirty-state warning view should show HubKeyDir for hub records")
+	}
+}
+
+// TestDirtyStateWarningViewShowsCountInTitle verifies that the host count is
+// visible in the dialog title.
+func TestDirtyStateWarningViewShowsCountInTitle(t *testing.T) {
+	cfg := dirtyConfig()
+	ds := makeDirtyState("host-01", "smux-distribute-a", "host-02", "smux-distribute-b")
+	m := withWindowSize(New(cfg, WithDirtyState(ds)), 120, 40)
+
+	view := m.View()
+	if !strings.Contains(view, "2 host(s)") {
+		t.Errorf("dirty-state warning title should show '2 host(s)'; got:\n%s", view)
+	}
+}
+
+// TestDirtyStateWarningViewContainsHints verifies that the warning dialog
+// shows key-binding hints for acknowledge ('y'/'Enter') and cleanup ('c').
+func TestDirtyStateWarningViewContainsHints(t *testing.T) {
+	cfg := dirtyConfig()
+	ds := makeDirtyState("host-01", "smux-distribute-abc")
+	m := withWindowSize(New(cfg, WithDirtyState(ds)), 120, 40)
+
+	view := m.View()
+	if !strings.Contains(view, "acknowledge") {
+		t.Error("dirty-state warning view should mention 'acknowledge'")
+	}
+	if !strings.Contains(view, "clean up") {
+		t.Error("dirty-state warning view should mention 'clean up'")
+	}
+}
+
+// TestDirtyStateWarningAcknowledgeWithY verifies that pressing 'y' in the
+// warning dialog transitions the model to BrowsingPhase without triggering
+// cleanup.
+func TestDirtyStateWarningAcknowledgeWithY(t *testing.T) {
+	cfg := dirtyConfig()
+	ds := makeDirtyState("host-01", "smux-distribute-abc")
+	m := withWindowSize(New(cfg, WithDirtyState(ds)), 80, 24)
+
+	if _, ok := m.state.Phase.(DirtyStateWarningPhase); !ok {
+		t.Fatal("expected DirtyStateWarningPhase at start")
+	}
+
+	m, cmd := sendKey(m, "y")
+
+	if _, ok := m.state.Phase.(BrowsingPhase); !ok {
+		t.Errorf("pressing 'y' should transition to BrowsingPhase; got %T", m.state.Phase)
+	}
+	if cmd != nil {
+		t.Error("pressing 'y' (acknowledge) should return nil cmd, not trigger any background work")
+	}
+}
+
+// TestDirtyStateWarningAcknowledgeWithEnter verifies that pressing Enter has
+// the same effect as pressing 'y' (acknowledge without cleanup).
+func TestDirtyStateWarningAcknowledgeWithEnter(t *testing.T) {
+	cfg := dirtyConfig()
+	ds := makeDirtyState("host-01", "smux-distribute-abc")
+	m := withWindowSize(New(cfg, WithDirtyState(ds)), 80, 24)
+
+	m, cmd := sendKey(m, "enter")
+
+	if _, ok := m.state.Phase.(BrowsingPhase); !ok {
+		t.Errorf("pressing Enter should transition to BrowsingPhase; got %T", m.state.Phase)
+	}
+	if cmd != nil {
+		t.Error("pressing Enter (acknowledge) should return nil cmd")
+	}
+}
+
+// TestDirtyStateWarningQuitWithQ verifies that pressing 'q' from the warning
+// dialog exits smux (sets Done + Quit result + returns tea.Quit).
+func TestDirtyStateWarningQuitWithQ(t *testing.T) {
+	cfg := dirtyConfig()
+	ds := makeDirtyState("host-01", "smux-distribute-abc")
+	m := withWindowSize(New(cfg, WithDirtyState(ds)), 80, 24)
+
+	m, cmd := sendKey(m, "q")
+
+	if !m.Done() {
+		t.Error("pressing 'q' in dirty-state warning should mark model as done")
+	}
+	if !m.GetResult().Quit {
+		t.Error("pressing 'q' in dirty-state warning should set Result.Quit = true")
+	}
+	if !isQuitCmd(cmd) {
+		t.Error("pressing 'q' in dirty-state warning should return tea.Quit command")
+	}
+}
+
+// TestDirtyStateWarningQuitWithCtrlC verifies that pressing Ctrl+C from the
+// warning dialog exits smux.
+func TestDirtyStateWarningQuitWithCtrlC(t *testing.T) {
+	cfg := dirtyConfig()
+	ds := makeDirtyState("host-01", "smux-distribute-abc")
+	m := withWindowSize(New(cfg, WithDirtyState(ds)), 80, 24)
+
+	m, cmd := sendKey(m, "ctrl+c")
+
+	if !m.Done() {
+		t.Error("Ctrl+C in dirty-state warning should mark model as done")
+	}
+	if !m.GetResult().Quit {
+		t.Error("Ctrl+C in dirty-state warning should set Result.Quit = true")
+	}
+	if !isQuitCmd(cmd) {
+		t.Error("Ctrl+C in dirty-state warning should return tea.Quit command")
+	}
+}
+
+// TestDirtyStateWarningCleanupTrigger verifies that pressing 'c' in the
+// warning dialog sets the Cleaning flag on DirtyStateWarningPhase and returns
+// a non-nil background command.
+func TestDirtyStateWarningCleanupTrigger(t *testing.T) {
+	cfg := dirtyConfig()
+	ds := makeDirtyState("host-01", "smux-distribute-abc")
+	m := withWindowSize(New(cfg, WithDirtyState(ds)), 80, 24)
+
+	m, cmd := sendKey(m, "c")
+
+	phase, ok := m.state.Phase.(DirtyStateWarningPhase)
+	if !ok {
+		t.Fatalf("after pressing 'c' expected DirtyStateWarningPhase; got %T", m.state.Phase)
+	}
+	if !phase.Cleaning {
+		t.Error("pressing 'c' should set DirtyStateWarningPhase.Cleaning = true")
+	}
+	if cmd == nil {
+		t.Error("pressing 'c' should return a non-nil background cleanup command")
+	}
+}
+
+// TestDirtyStateWarningCleaningViewShownWhileCleaning verifies that the view
+// switches to a "Cleaning up…" message once Cleaning is set.
+func TestDirtyStateWarningCleaningViewShownWhileCleaning(t *testing.T) {
+	cfg := dirtyConfig()
+	ds := makeDirtyState("host-01", "smux-distribute-abc")
+	m := withWindowSize(New(cfg, WithDirtyState(ds)), 80, 24)
+
+	// Trigger cleanup.
+	m, _ = sendKey(m, "c")
+
+	view := m.View()
+	if !strings.Contains(view, "Cleaning") {
+		t.Errorf("view while cleaning should contain 'Cleaning'; got:\n%s", view)
+	}
+}
+
+// TestDirtyStateWarningKeysIgnoredWhileCleaning verifies that key presses
+// other than the ones handled are ignored while cleanup is in progress.
+func TestDirtyStateWarningKeysIgnoredWhileCleaning(t *testing.T) {
+	cfg := dirtyConfig()
+	ds := makeDirtyState("host-01", "smux-distribute-abc")
+	m := withWindowSize(New(cfg, WithDirtyState(ds)), 80, 24)
+
+	// Start cleaning.
+	m, _ = sendKey(m, "c")
+	if _, ok := m.state.Phase.(DirtyStateWarningPhase); !ok {
+		t.Fatal("expected DirtyStateWarningPhase after pressing c")
+	}
+
+	// 'y' should be ignored while cleaning (still in warning phase).
+	m2, _ := sendKey(m, "y")
+	if _, ok := m2.state.Phase.(DirtyStateWarningPhase); !ok {
+		t.Error("'y' should be ignored while cleaning; phase should remain DirtyStateWarningPhase")
+	}
+}
+
+// TestDirtyCleanupCompleteTransitionsToBrowsing verifies that delivering a
+// dirtyCleanupCompleteMsg transitions the model from DirtyStateWarningPhase
+// to BrowsingPhase.
+func TestDirtyCleanupCompleteTransitionsToBrowsing(t *testing.T) {
+	cfg := dirtyConfig()
+	ds := makeDirtyState("host-01", "smux-distribute-abc")
+	m := withWindowSize(New(cfg, WithDirtyState(ds)), 80, 24)
+
+	// Trigger cleanup.
+	m, _ = sendKey(m, "c")
+
+	// Deliver the cleanup-complete message.
+	updated, _ := m.Update(dirtyCleanupCompleteMsg{err: nil})
+	m = updated.(Model)
+
+	if _, ok := m.state.Phase.(BrowsingPhase); !ok {
+		t.Errorf("after cleanup complete, expected BrowsingPhase; got %T", m.state.Phase)
+	}
+}
+
+// TestDirtyStateWarningNotShownWhenNoDirtyState verifies that when no dirty
+// state is injected (the default for most tests), the model starts directly in
+// BrowsingPhase — the warning dialog never appears.
+func TestDirtyStateWarningNotShownWhenNoDirtyState(t *testing.T) {
+	// Use WithDirtyHosts (empty) to ensure no disk-loaded state interferes.
+	m := withWindowSize(New(minimalConfig(), WithDirtyHosts(map[string]bool{})), 80, 24)
+
+	if _, ok := m.state.Phase.(BrowsingPhase); !ok {
+		t.Errorf("model with no dirty state should start in BrowsingPhase; got %T",
+			m.state.Phase)
+	}
+	view := m.View()
+	if strings.Contains(view, "Pending SSH Key Cleanup") {
+		t.Error("view should not show dirty-state warning when there is no dirty state")
+	}
+}
+
+// TestWithDirtyHostsDoesNotTriggerWarningPhase verifies that WithDirtyHosts
+// (the inventory-marker test helper) does NOT trigger the DirtyStateWarningPhase.
+// This protects existing inventory-marker tests from being broken by the
+// startup warning feature.
+func TestWithDirtyHostsDoesNotTriggerWarningPhase(t *testing.T) {
+	cfg := dirtyConfig()
+	dirtySet := map[string]bool{"host-01": true}
+	m := New(cfg, WithDirtyHosts(dirtySet))
+
+	if _, ok := m.state.Phase.(BrowsingPhase); !ok {
+		t.Errorf("WithDirtyHosts should leave phase as BrowsingPhase; got %T", m.state.Phase)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Sub-AC 3 – Exit dirty-state warning dialog (QuitDirtyWarningPhase)
+// ---------------------------------------------------------------------------
+
+// TestQKeyWithDirtyStateShowsExitWarning verifies that pressing 'q' in
+// BrowsingPhase when dirty state is present transitions to
+// QuitDirtyWarningPhase instead of quitting immediately.
+func TestQKeyWithDirtyStateShowsExitWarning(t *testing.T) {
+	cfg := dirtyConfig()
+	ds := makeDirtyState("host-01", "smux-distribute-abc")
+	// WithDirtyState sets DirtyStateWarningPhase; acknowledge it first.
+	m := withWindowSize(New(cfg, WithDirtyState(ds)), 80, 24)
+	// Acknowledge startup warning to enter BrowsingPhase.
+	m, _ = sendKey(m, "y")
+	if _, ok := m.state.Phase.(BrowsingPhase); !ok {
+		t.Fatalf("expected BrowsingPhase after 'y', got %T", m.state.Phase)
+	}
+
+	// Press 'q' — should show exit dirty-state warning, not quit.
+	m, cmd := sendKey(m, "q")
+
+	phase, ok := m.state.Phase.(QuitDirtyWarningPhase)
+	if !ok {
+		t.Fatalf("pressing 'q' with dirty state should enter QuitDirtyWarningPhase; got %T", m.state.Phase)
+	}
+	if len(phase.Hosts) == 0 {
+		t.Error("QuitDirtyWarningPhase.Hosts should contain the dirty hosts")
+	}
+	if m.Done() {
+		t.Error("model should not be done yet; user has not confirmed quit")
+	}
+	if isQuitCmd(cmd) {
+		t.Error("pressing 'q' with dirty state should not return tea.Quit command immediately")
+	}
+}
+
+// TestQKeyWithNoDirtyStateQuitsImmediately verifies that pressing 'q' when
+// there is no dirty state still quits immediately (no regression).
+func TestQKeyWithNoDirtyStateQuitsImmediately(t *testing.T) {
+	m := withWindowSize(New(minimalConfig(), WithDirtyHosts(map[string]bool{})), 80, 24)
+
+	m, cmd := sendKey(m, "q")
+
+	if !m.Done() {
+		t.Error("pressing 'q' with no dirty state should mark model as done")
+	}
+	if !isQuitCmd(cmd) {
+		t.Error("pressing 'q' with no dirty state should return tea.Quit")
+	}
+}
+
+// TestQuitDirtyWarningYQuitsWithoutCleanup verifies that pressing 'y' in
+// QuitDirtyWarningPhase quits immediately without performing cleanup.
+func TestQuitDirtyWarningYQuitsWithoutCleanup(t *testing.T) {
+	cfg := dirtyConfig()
+	ds := makeDirtyState("host-01", "smux-distribute-abc")
+	m := withWindowSize(New(cfg, WithDirtyState(ds)), 80, 24)
+	m, _ = sendKey(m, "y") // acknowledge startup warning
+
+	// Enter QuitDirtyWarningPhase via 'q'.
+	m, _ = sendKey(m, "q")
+	if _, ok := m.state.Phase.(QuitDirtyWarningPhase); !ok {
+		t.Fatalf("expected QuitDirtyWarningPhase, got %T", m.state.Phase)
+	}
+
+	// Press 'y' to quit without cleanup.
+	m, cmd := sendKey(m, "y")
+
+	if !m.Done() {
+		t.Error("pressing 'y' in QuitDirtyWarningPhase should mark model as done")
+	}
+	if !m.GetResult().Quit {
+		t.Error("pressing 'y' in QuitDirtyWarningPhase should set Result.Quit = true")
+	}
+	if !isQuitCmd(cmd) {
+		t.Error("pressing 'y' in QuitDirtyWarningPhase should return tea.Quit")
+	}
+}
+
+// TestQuitDirtyWarningEnterQuitsWithoutCleanup verifies that Enter also
+// triggers an immediate quit from QuitDirtyWarningPhase.
+func TestQuitDirtyWarningEnterQuitsWithoutCleanup(t *testing.T) {
+	cfg := dirtyConfig()
+	ds := makeDirtyState("host-01", "smux-distribute-abc")
+	m := withWindowSize(New(cfg, WithDirtyState(ds)), 80, 24)
+	m, _ = sendKey(m, "y") // acknowledge startup warning
+	m, _ = sendKey(m, "q") // enter QuitDirtyWarningPhase
+
+	m, cmd := sendKey(m, "enter")
+
+	if !m.Done() {
+		t.Error("pressing Enter in QuitDirtyWarningPhase should mark model as done")
+	}
+	if !isQuitCmd(cmd) {
+		t.Error("pressing Enter in QuitDirtyWarningPhase should return tea.Quit")
+	}
+}
+
+// TestQuitDirtyWarningNEscCancelsQuit verifies that pressing 'n' or Esc in
+// QuitDirtyWarningPhase cancels the quit and returns to BrowsingPhase.
+func TestQuitDirtyWarningNEscCancelsQuit(t *testing.T) {
+	for _, key := range []string{"n", "esc"} {
+		t.Run("key="+key, func(t *testing.T) {
+			cfg := dirtyConfig()
+			ds := makeDirtyState("host-01", "smux-distribute-abc")
+			m := withWindowSize(New(cfg, WithDirtyState(ds)), 80, 24)
+			m, _ = sendKey(m, "y") // acknowledge startup warning
+			m, _ = sendKey(m, "q") // enter QuitDirtyWarningPhase
+
+			m, cmd := sendKey(m, key)
+
+			if _, ok := m.state.Phase.(BrowsingPhase); !ok {
+				t.Errorf("pressing %q should return to BrowsingPhase; got %T", key, m.state.Phase)
+			}
+			if m.Done() {
+				t.Errorf("pressing %q should not mark model as done", key)
+			}
+			if isQuitCmd(cmd) {
+				t.Errorf("pressing %q should not return tea.Quit", key)
+			}
+		})
+	}
+}
+
+// TestQuitDirtyWarningCtrlCEmergencyQuit verifies that Ctrl+C in
+// QuitDirtyWarningPhase performs an emergency quit (no cleanup).
+func TestQuitDirtyWarningCtrlCEmergencyQuit(t *testing.T) {
+	cfg := dirtyConfig()
+	ds := makeDirtyState("host-01", "smux-distribute-abc")
+	m := withWindowSize(New(cfg, WithDirtyState(ds)), 80, 24)
+	m, _ = sendKey(m, "y") // acknowledge startup warning
+	m, _ = sendKey(m, "q") // enter QuitDirtyWarningPhase
+
+	m, cmd := sendKey(m, "ctrl+c")
+
+	if !m.Done() {
+		t.Error("Ctrl+C in QuitDirtyWarningPhase should mark model as done")
+	}
+	if !isQuitCmd(cmd) {
+		t.Error("Ctrl+C in QuitDirtyWarningPhase should return tea.Quit")
+	}
+}
+
+// TestQuitDirtyWarningCStartsCleanup verifies that pressing 'c' in
+// QuitDirtyWarningPhase sets Cleaning=true and returns a non-nil tea.Cmd
+// (the background cleanup goroutine).
+func TestQuitDirtyWarningCStartsCleanup(t *testing.T) {
+	cfg := dirtyConfig()
+	ds := makeDirtyState("host-01", "smux-distribute-abc")
+	m := withWindowSize(New(cfg, WithDirtyState(ds)), 80, 24)
+	m, _ = sendKey(m, "y") // acknowledge startup warning
+	m, _ = sendKey(m, "q") // enter QuitDirtyWarningPhase
+
+	m, cmd := sendKey(m, "c")
+
+	phase, ok := m.state.Phase.(QuitDirtyWarningPhase)
+	if !ok {
+		t.Fatalf("after pressing 'c' expected QuitDirtyWarningPhase; got %T", m.state.Phase)
+	}
+	if !phase.Cleaning {
+		t.Error("pressing 'c' should set QuitDirtyWarningPhase.Cleaning = true")
+	}
+	if cmd == nil {
+		t.Error("pressing 'c' should return a non-nil background cleanup command")
+	}
+	if m.Done() {
+		t.Error("model should not be done yet while cleanup is running")
+	}
+}
+
+// TestQuitDirtyWarningCleaningIgnoresKeys verifies that key presses are
+// ignored while cleanup is in progress (Cleaning=true).
+func TestQuitDirtyWarningCleaningIgnoresKeys(t *testing.T) {
+	cfg := dirtyConfig()
+	ds := makeDirtyState("host-01", "smux-distribute-abc")
+	m := withWindowSize(New(cfg, WithDirtyState(ds)), 80, 24)
+	m, _ = sendKey(m, "y") // acknowledge startup warning
+	m, _ = sendKey(m, "q") // enter QuitDirtyWarningPhase
+	m, _ = sendKey(m, "c") // start cleaning
+
+	// 'y' should be ignored while cleaning.
+	m2, _ := sendKey(m, "y")
+	if _, ok := m2.state.Phase.(QuitDirtyWarningPhase); !ok {
+		t.Error("'y' should be ignored while cleaning; phase should remain QuitDirtyWarningPhase")
+	}
+	if m2.Done() {
+		t.Error("model should not be done while cleanup is running")
+	}
+}
+
+// TestQuitDirtyWarningCleanupCompleteQuitsSmux verifies that delivering a
+// quitDirtyCleanupCompleteMsg causes the model to quit.
+func TestQuitDirtyWarningCleanupCompleteQuitsSmux(t *testing.T) {
+	cfg := dirtyConfig()
+	ds := makeDirtyState("host-01", "smux-distribute-abc")
+	m := withWindowSize(New(cfg, WithDirtyState(ds)), 80, 24)
+	m, _ = sendKey(m, "y") // acknowledge startup warning
+	m, _ = sendKey(m, "q") // enter QuitDirtyWarningPhase
+	m, _ = sendKey(m, "c") // start cleaning
+
+	// Deliver the quit-cleanup-complete message.
+	updated, cmd := m.Update(quitDirtyCleanupCompleteMsg{err: nil, needsWindowKill: false})
+	m = updated.(Model)
+
+	if !m.Done() {
+		t.Error("after quitDirtyCleanupCompleteMsg, model should be done")
+	}
+	if !m.GetResult().Quit {
+		t.Error("after quitDirtyCleanupCompleteMsg, Result.Quit should be true")
+	}
+	if !isQuitCmd(cmd) {
+		t.Error("after quitDirtyCleanupCompleteMsg, should return tea.Quit command")
+	}
+}
+
+// TestQuitDirtyWarningViewContainsDirtyHosts verifies that the exit
+// dirty-state warning dialog view includes the dirty host names.
+func TestQuitDirtyWarningViewContainsDirtyHosts(t *testing.T) {
+	cfg := dirtyConfig()
+	ds := makeDirtyState("host-01", "smux-distribute-abc", "host-02", "smux-distribute-def")
+	m := withWindowSize(New(cfg, WithDirtyState(ds)), 80, 24)
+	m, _ = sendKey(m, "y") // acknowledge startup warning
+	m, _ = sendKey(m, "q") // enter QuitDirtyWarningPhase
+
+	view := m.View()
+	if !strings.Contains(view, "host-01") {
+		t.Errorf("exit dirty-state warning view should mention 'host-01'; got:\n%s", view)
+	}
+	if !strings.Contains(view, "host-02") {
+		t.Errorf("exit dirty-state warning view should mention 'host-02'; got:\n%s", view)
+	}
+	if !strings.Contains(view, "Unresolved SSH Key Cleanup") {
+		t.Errorf("exit dirty-state warning view should contain title; got:\n%s", view)
+	}
+}
+
+// TestQuitDirtyWarningViewShowsCleaningWhileCleaning verifies that the view
+// switches to a "Cleaning up…" message once Cleaning is set.
+func TestQuitDirtyWarningViewShowsCleaningWhileCleaning(t *testing.T) {
+	cfg := dirtyConfig()
+	ds := makeDirtyState("host-01", "smux-distribute-abc")
+	m := withWindowSize(New(cfg, WithDirtyState(ds)), 80, 24)
+	m, _ = sendKey(m, "y") // acknowledge startup warning
+	m, _ = sendKey(m, "q") // enter QuitDirtyWarningPhase
+	m, _ = sendKey(m, "c") // trigger cleanup (Cleaning=true)
+
+	view := m.View()
+	if !strings.Contains(view, "Cleaning") {
+		t.Errorf("view while cleaning should contain 'Cleaning'; got:\n%s", view)
+	}
+}
+
+// TestQuitDirtyWarningViewShowsKeyBindings verifies that the exit
+// dirty-state warning dialog shows the key binding hints.
+func TestQuitDirtyWarningViewShowsKeyBindings(t *testing.T) {
+	cfg := dirtyConfig()
+	ds := makeDirtyState("host-01", "smux-distribute-abc")
+	m := withWindowSize(New(cfg, WithDirtyState(ds)), 80, 24)
+	m, _ = sendKey(m, "y") // acknowledge startup warning
+	m, _ = sendKey(m, "q") // enter QuitDirtyWarningPhase
+
+	view := m.View()
+	// Must mention the three options.
+	for _, hint := range []string{"c", "y", "n"} {
+		if !strings.Contains(view, hint) {
+			t.Errorf("exit dirty-state warning view should mention key %q; got:\n%s", hint, view)
+		}
+	}
+}
+
+// TestPersistentQuitWithDirtyStateShowsExitWarning verifies that in
+// persistent mode, when the user confirms quit (QuitConfirmingPhase → 'y')
+// while dirty state is present, the model transitions to QuitDirtyWarningPhase
+// instead of killing windows and quitting immediately.
+func TestPersistentQuitWithDirtyStateShowsExitWarning(t *testing.T) {
+	cfg := dirtyConfig()
+	ds := makeDirtyState("host-01", "smux-distribute-abc")
+
+	windowsKilled := false
+	m := withWindowSize(New(cfg, WithDirtyState(ds),
+		WithPersistentMode(
+			func() int { return 1 },
+			func() error { windowsKilled = true; return nil },
+		),
+	), 80, 24)
+
+	// Acknowledge startup warning.
+	m, _ = sendKey(m, "y")
+	if _, ok := m.state.Phase.(BrowsingPhase); !ok {
+		t.Fatalf("expected BrowsingPhase after 'y', got %T", m.state.Phase)
+	}
+
+	// Press 'q' in persistent mode → should enter QuitConfirmingPhase.
+	m, _ = sendKey(m, "q")
+	if _, ok := m.state.Phase.(QuitConfirmingPhase); !ok {
+		t.Fatalf("persistent 'q' should enter QuitConfirmingPhase; got %T", m.state.Phase)
+	}
+
+	// Confirm quit ('y') → should enter QuitDirtyWarningPhase (not quit yet).
+	m, cmd := sendKey(m, "y")
+	phase, ok := m.state.Phase.(QuitDirtyWarningPhase)
+	if !ok {
+		t.Fatalf("confirming persistent quit with dirty state should enter QuitDirtyWarningPhase; got %T", m.state.Phase)
+	}
+	if !phase.NeedsWindowKill {
+		t.Error("QuitDirtyWarningPhase.NeedsWindowKill should be true in persistent mode")
+	}
+	if m.Done() {
+		t.Error("model should not be done yet")
+	}
+	if isQuitCmd(cmd) {
+		t.Error("should not quit immediately; dirty warning must be shown first")
+	}
+	if windowsKilled {
+		t.Error("managed windows should not be killed before dirty warning is resolved")
+	}
+}
+
+// TestPersistentQuitDirtyWarningYKillsWindowsAndQuits verifies that pressing
+// 'y' in QuitDirtyWarningPhase when NeedsWindowKill=true calls
+// killManagedWindows before quitting.
+func TestPersistentQuitDirtyWarningYKillsWindowsAndQuits(t *testing.T) {
+	cfg := dirtyConfig()
+	ds := makeDirtyState("host-01", "smux-distribute-abc")
+
+	windowsKilled := false
+	m := withWindowSize(New(cfg, WithDirtyState(ds),
+		WithPersistentMode(
+			func() int { return 1 },
+			func() error { windowsKilled = true; return nil },
+		),
+	), 80, 24)
+
+	// Navigate to QuitDirtyWarningPhase with NeedsWindowKill=true.
+	m, _ = sendKey(m, "y") // ack startup warning
+	m, _ = sendKey(m, "q") // → QuitConfirmingPhase
+	m, _ = sendKey(m, "y") // → QuitDirtyWarningPhase (NeedsWindowKill=true)
+
+	if _, ok := m.state.Phase.(QuitDirtyWarningPhase); !ok {
+		t.Fatalf("expected QuitDirtyWarningPhase, got %T", m.state.Phase)
+	}
+
+	// Confirm quit without cleanup.
+	m, cmd := sendKey(m, "y")
+
+	if !m.Done() {
+		t.Error("model should be done after confirming quit")
+	}
+	if !isQuitCmd(cmd) {
+		t.Error("should return tea.Quit command")
+	}
+	if !windowsKilled {
+		t.Error("killManagedWindows should be called when NeedsWindowKill=true")
+	}
+}
+
+// TestPersistentQuitNoDirtyStateStillQuitsNormally verifies that in
+// persistent mode, if there is no dirty state, the quit-confirm dialog still
+// kills windows and quits without showing the dirty warning.
+func TestPersistentQuitNoDirtyStateStillQuitsNormally(t *testing.T) {
+	windowsKilled := false
+	m := withWindowSize(New(minimalConfig(), WithDirtyHosts(map[string]bool{}),
+		WithPersistentMode(
+			func() int { return 1 },
+			func() error { windowsKilled = true; return nil },
+		),
+	), 80, 24)
+
+	// Press 'q' → QuitConfirmingPhase.
+	m, _ = sendKey(m, "q")
+	if _, ok := m.state.Phase.(QuitConfirmingPhase); !ok {
+		t.Fatalf("expected QuitConfirmingPhase, got %T", m.state.Phase)
+	}
+
+	// Confirm → should kill windows and quit immediately (no dirty warning).
+	m, cmd := sendKey(m, "y")
+
+	if _, ok := m.state.Phase.(QuitDirtyWarningPhase); ok {
+		t.Error("should not enter QuitDirtyWarningPhase when no dirty state")
+	}
+	if !m.Done() {
+		t.Error("model should be done after confirming quit")
+	}
+	if !isQuitCmd(cmd) {
+		t.Error("should return tea.Quit")
+	}
+	if !windowsKilled {
+		t.Error("managed windows should be killed when no dirty state")
+	}
+}
+
+// TestQuitDirtyWarningCleanupCompleteWithWindowKill verifies that
+// quitDirtyCleanupCompleteMsg with NeedsWindowKill=true calls
+// killManagedWindows before quitting.
+func TestQuitDirtyWarningCleanupCompleteWithWindowKill(t *testing.T) {
+	cfg := dirtyConfig()
+	ds := makeDirtyState("host-01", "smux-distribute-abc")
+
+	windowsKilled := false
+	m := withWindowSize(New(cfg, WithDirtyState(ds),
+		WithPersistentMode(
+			func() int { return 1 },
+			func() error { windowsKilled = true; return nil },
+		),
+	), 80, 24)
+
+	m, _ = sendKey(m, "y") // ack startup warning
+	m, _ = sendKey(m, "q") // → QuitConfirmingPhase
+	m, _ = sendKey(m, "y") // → QuitDirtyWarningPhase (NeedsWindowKill=true)
+	m, _ = sendKey(m, "c") // start cleanup
+
+	// Deliver cleanup-complete with needsWindowKill=true.
+	updated, cmd := m.Update(quitDirtyCleanupCompleteMsg{err: nil, needsWindowKill: true})
+	m = updated.(Model)
+
+	if !m.Done() {
+		t.Error("model should be done after cleanup-complete with quit")
+	}
+	if !isQuitCmd(cmd) {
+		t.Error("should return tea.Quit after cleanup-complete")
+	}
+	if !windowsKilled {
+		t.Error("killManagedWindows should be called when needsWindowKill=true")
 	}
 }

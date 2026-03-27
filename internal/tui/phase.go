@@ -1,5 +1,7 @@
 package tui
 
+import "github.com/Suckzoo/smux/internal/dirtystate"
+
 // ---------------------------------------------------------------------------
 // Phase — typed TUI selection state machine
 // ---------------------------------------------------------------------------
@@ -7,14 +9,21 @@ package tui
 // The phase state machine models the four distinct interaction phases of the
 // host-selection TUI.  The valid transition edges are:
 //
+//   DirtyStateWarningPhase ── y/Enter ──────────────▶  BrowsingPhase
+//   DirtyStateWarningPhase ── c ─────────────────────▶  DirtyStateWarningPhase (Cleaning=true)
+//   DirtyStateWarningPhase ── cleanup done ──────────▶  BrowsingPhase
 //   BrowsingPhase  ──── '/'        ────────────────▶  SelectingPhase
 //   BrowsingPhase  ──── Enter (< threshold) ────────▶  LaunchingPhase
 //   BrowsingPhase  ──── Enter (≥ threshold) ────────▶  ConfirmingPhase
+//   BrowsingPhase  ──── 'C' (dirty hosts exist) ────▶  DirtyCleanupConfirmPhase
 //   SelectingPhase ──── Esc / Enter ────────────────▶  BrowsingPhase
 //   ConfirmingPhase ─── y ──────────────────────────▶  LaunchingPhase
 //   ConfirmingPhase ─── n / Esc ────────────────────▶  BrowsingPhase
+//   DirtyCleanupConfirmPhase ── y/Enter ────────────▶  DirtyCleanupConfirmPhase (Cleaning=true)
+//   DirtyCleanupConfirmPhase ── cleanup done ────────▶  BrowsingPhase
+//   DirtyCleanupConfirmPhase ── n/Esc ──────────────▶  BrowsingPhase
 //
-// Phase is a closed interface: only the four concrete types in this file
+// Phase is a closed interface: only the concrete types in this file
 // satisfy it.  Callers use type-switch or type-assertion to discriminate.
 
 // Phase represents the current interaction phase of the host-selection TUI.
@@ -59,12 +68,77 @@ type QuitConfirmingPhase struct {
 	WindowCount int
 }
 
+// DirtyStateWarningPhase is the startup dirty-state warning dialog state.
+// Entered automatically at startup when ~/.smux/dirty-state.json contains
+// hosts with pending SSH key cleanup from a previous distribute-file
+// operation.  The dialog lists all affected hosts and offers two choices:
+//   - 'y' / Enter: acknowledge and proceed to BrowsingPhase without cleanup
+//   - 'c': trigger immediate cleanup, then proceed to BrowsingPhase
+//   - 'q' / Ctrl+C: quit smux
+type DirtyStateWarningPhase struct {
+	// Hosts is the list of dirty hosts loaded from disk at startup.
+	Hosts []dirtystate.DirtyHost
+	// Cleaning is true while background cleanup is in progress (after the
+	// user pressed 'c').  The view renders a "Cleaning up…" indicator and
+	// ignores all key presses until the cleanup command completes.
+	Cleaning bool
+}
+
+// QuitDirtyWarningPhase is the exit dirty-state warning dialog state.
+// Entered when the user attempts to quit smux (via 'q' or the quit-confirm
+// dialog) while ~/.smux/dirty-state.json still contains hosts with pending
+// temporary SSH key cleanup from a distribute-file operation.
+//
+// The dialog reminds the user of the unresolved dirty hosts and offers:
+//   - 'c': retry cleanup now (then quit after cleanup finishes)
+//   - 'y' / Enter: quit without cleanup (leaving keys on remote hosts)
+//   - 'n' / Esc: cancel quit and return to BrowsingPhase
+//   - Ctrl+C: emergency quit (bypass warning, no cleanup)
+type QuitDirtyWarningPhase struct {
+	// Hosts is the list of dirty hosts with pending cleanup.
+	Hosts []dirtystate.DirtyHost
+	// Cleaning is true while background cleanup is in progress (after the
+	// user pressed 'c').  The view renders a "Cleaning up…" indicator and
+	// ignores all key presses until the cleanup command completes.
+	Cleaning bool
+	// NeedsWindowKill is true when this phase was entered via the persistent-
+	// mode quit-confirm dialog ('q' → QuitConfirmingPhase → 'y').  When set,
+	// the model will call killManagedWindows before exiting (whether after
+	// cleanup or on direct 'y' acknowledge).
+	NeedsWindowKill bool
+}
+
+// DirtyCleanupConfirmPhase is the on-demand cleanup confirmation dialog state.
+// Entered from BrowsingPhase when the user presses 'C' and there are dirty
+// hosts (hosts with leftover temporary SSH keys from a previous
+// distribute-file operation).  The dialog displays a security risk warning
+// and lists the target hosts before proceeding.
+//
+// The subset of dirty hosts to clean is the intersection of the user's TUI
+// selection and the dirty set; if no dirty hosts are currently selected in
+// the TUI, all dirty hosts are targeted.
+//
+//   - 'y' / Enter: start cleanup, transition to Cleaning=true sub-state.
+//   - 'n' / Esc:   cancel and return to BrowsingPhase.
+//   - 'q' / Ctrl+C: quit smux.
+type DirtyCleanupConfirmPhase struct {
+	// Hosts is the subset of dirty hosts that will be cleaned on confirmation.
+	Hosts []dirtystate.DirtyHost
+	// Cleaning is true while background cleanup is in progress (after the
+	// user pressed 'y').  The view renders a "Cleaning up…" indicator and
+	// ignores all key presses until the cleanup command completes.
+	Cleaning bool
+}
+
 // Marker implementations keep the Phase union closed.
-func (BrowsingPhase) isPhase()       {}
-func (SelectingPhase) isPhase()      {}
-func (ConfirmingPhase) isPhase()     {}
-func (LaunchingPhase) isPhase()      {}
-func (QuitConfirmingPhase) isPhase() {}
+func (BrowsingPhase) isPhase()              {}
+func (SelectingPhase) isPhase()             {}
+func (ConfirmingPhase) isPhase()            {}
+func (LaunchingPhase) isPhase()             {}
+func (QuitConfirmingPhase) isPhase()        {}
+func (DirtyStateWarningPhase) isPhase()     {}
+func (QuitDirtyWarningPhase) isPhase()      {}
+func (DirtyCleanupConfirmPhase) isPhase()   {}
 
 // DefaultConfirmThreshold is the number of selected hosts at which the TUI
 // switches to ConfirmingPhase before launching SSH panes.  It is used when
@@ -78,13 +152,17 @@ func ValidTransition(src, dst Phase) bool {
 	switch src.(type) {
 	case BrowsingPhase:
 		switch dst.(type) {
-		case SelectingPhase:      // '/' pressed
+		case SelectingPhase:              // '/' pressed
 			return true
-		case ConfirmingPhase:     // Enter with ≥ Threshold hosts selected
+		case ConfirmingPhase:             // Enter with ≥ Threshold hosts selected
 			return true
-		case LaunchingPhase:      // Enter with < Threshold hosts selected
+		case LaunchingPhase:              // Enter with < Threshold hosts selected
 			return true
-		case QuitConfirmingPhase: // 'q' pressed in persistent mode
+		case QuitConfirmingPhase:         // 'q' pressed in persistent mode
+			return true
+		case QuitDirtyWarningPhase:       // 'q' pressed while dirty state exists (non-persistent)
+			return true
+		case DirtyCleanupConfirmPhase:    // 'C' pressed while dirty hosts exist
 			return true
 		}
 	case SelectingPhase:
@@ -101,9 +179,32 @@ func ValidTransition(src, dst Phase) bool {
 		}
 	case QuitConfirmingPhase:
 		switch dst.(type) {
-		case BrowsingPhase:  // n or Esc pressed
+		case BrowsingPhase:          // n or Esc pressed
 			return true
-		case LaunchingPhase: // y pressed (kills windows then exits)
+		case LaunchingPhase:         // y pressed (kills windows then exits)
+			return true
+		case QuitDirtyWarningPhase:  // y pressed but dirty state exists
+			return true
+		}
+	case DirtyStateWarningPhase:
+		switch dst.(type) {
+		case BrowsingPhase: // y/Enter acknowledged, or cleanup completed
+			return true
+		case DirtyStateWarningPhase: // 'c' pressed — same phase, Cleaning flag set
+			return true
+		}
+	case QuitDirtyWarningPhase:
+		switch dst.(type) {
+		case BrowsingPhase:          // n/Esc pressed — cancel quit
+			return true
+		case QuitDirtyWarningPhase:  // 'c' pressed — same phase, Cleaning flag set
+			return true
+		}
+	case DirtyCleanupConfirmPhase:
+		switch dst.(type) {
+		case BrowsingPhase:               // n/Esc pressed — cancel cleanup
+			return true
+		case DirtyCleanupConfirmPhase:    // 'y' pressed — same phase, Cleaning flag set
 			return true
 		}
 	}

@@ -10,6 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/Suckzoo/smux/internal/config"
+	"github.com/Suckzoo/smux/internal/dirtystate"
 	"github.com/Suckzoo/smux/internal/tmux"
 	"github.com/Suckzoo/smux/internal/tui"
 )
@@ -164,6 +165,11 @@ func runPersistent(cfg *config.Config) error {
 		tmux.MoveWindowToFront(smuxWindowID)
 	}
 
+	// 8a. Load persistent dirty state and warn when previous cleanup work
+	//     was left incomplete (e.g. temporary SSH public keys still present on
+	//     remote hosts after a distribute-file operation).
+	warnDirtyState()
+
 	// 8. Register the prefix+s smart-open keybinding. This binding is PERMANENT:
 	//    it is NOT unbound when smux exits so the user can press prefix+s again to
 	//    revive smux after closing it.
@@ -245,6 +251,40 @@ func runTUI(cfg *config.Config, opts ...tui.ModelOption) (tui.Result, error) {
 		return tui.Result{Quit: true}, nil
 	}
 	return tm.GetResult(), nil
+}
+
+// warnDirtyState loads the dirty-state file from disk and, when it is
+// non-empty, prints a warning to stderr listing the hosts that still have
+// leftover temporary SSH public keys from a previous distribute-file
+// operation.  The warning is informational only; smux continues normally
+// regardless of whether dirty state is present.
+func warnDirtyState() {
+	ds, err := dirtystate.Load()
+	if err != nil {
+		// Non-fatal: a corrupt or unreadable file is not a reason to abort.
+		fmt.Fprintf(os.Stderr,
+			"smux: warning: could not read dirty-state file: %v\n", err)
+		return
+	}
+	if ds.IsEmpty() {
+		return
+	}
+	fmt.Fprintf(os.Stderr,
+		"smux: warning: %d host(s) have leftover temporary SSH keys from a previous distribute-file operation:\n",
+		len(ds.Hosts))
+	for _, h := range ds.Hosts {
+		addr := h.Host
+		if h.User != "" {
+			addr = h.User + "@" + addr
+		}
+		if h.Port != 0 {
+			addr = fmt.Sprintf("%s:%d", addr, h.Port)
+		}
+		fmt.Fprintf(os.Stderr, "  %s  (key: %s, added: %s)\n",
+			addr, h.KeyComment, h.AddedAt.Format("2006-01-02 15:04:05 UTC"))
+	}
+	fmt.Fprintf(os.Stderr,
+		"smux: run a manual cleanup to remove these keys, or they will be retried on the next distribute-file operation.\n")
 }
 
 // ensure version variables are referenced to satisfy goreleaser ldflags.
