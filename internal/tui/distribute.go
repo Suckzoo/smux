@@ -736,8 +736,22 @@ func (m DistributeModel) handleKey(msg tea.KeyMsg) (DistributeModel, tea.Cmd) {
 		return m, tea.Quit
 
 	case "esc":
-		if m.step > DistributeStepSourceSelect && m.step != DistributeStepRetryConfirm {
-			// Step back one step, preserving all state collected so far.
+		// Priority 1: dismiss the error overlay if it is open.
+		if m.errorOverlay != nil {
+			m.errorOverlay = nil
+			return m, nil
+		}
+		// Priority 2: return to main host list when execution has finished.
+		if m.step == DistributeStepExecute && m.executeDone {
+			m.exitToMain = true
+			m.done = true
+			return m, nil
+		}
+		// Default: step back through the wizard.
+		// DistributeStepRetryConfirm is a terminal entry-point; stepping back
+		// from it always returns to the normal TUI rather than going to the
+		// previous numeric step (which would be an unrelated wizard step).
+		if m.step > 0 && m.step != DistributeStepRetryConfirm {
 			m.step--
 			// In direct-parallel mode the hub-selection step does not exist.
 			// If stepping back lands on DistributeStepHubSelect but the current
@@ -1259,6 +1273,13 @@ func (m DistributeModel) handleConfirmKey(msg tea.KeyMsg) (DistributeModel, tea.
 // constructing a RetryParams from the current model state and returning a new
 // DistributeModel positioned at DistributeStepRetryConfirm.  Esc and
 // q/Ctrl+C are already consumed by the global handler.
+// handleExecuteKey handles key input during DistributeStepExecute.
+//
+// Enter starts the transfer (first press) or opens the error overlay for the
+// selected failed host (when execution is done).  j/k move the cursor through
+// the destination host list.  'r' retries failed hosts after execution
+// completes.  Esc and q/Ctrl+C are consumed by the global handleKey
+// dispatcher and never arrive here.
 func (m DistributeModel) handleExecuteKey(msg tea.KeyMsg) (DistributeModel, tea.Cmd) {
 	switch msg.String() {
 	case "enter":
@@ -1267,7 +1288,27 @@ func (m DistributeModel) handleExecuteKey(msg tea.KeyMsg) (DistributeModel, tea.
 			cmd := m.startExecution()
 			return m, cmd
 		}
-		// Execution already in progress or complete; no-op.
+		// Open error overlay for the selected host if it failed.
+		if m.executeDone && m.errorOverlay == nil && len(m.destHosts) > 0 {
+			selected := m.destHosts[m.progressCursor]
+			if m.hostProgress[selected.Host] == executor.TransferFailed {
+				reason := "(no details available)"
+				if m.hostErrors != nil {
+					if r, ok := m.hostErrors[selected.Host]; ok && r != "" {
+						reason = r
+					}
+				}
+				m.errorOverlay = &reason
+			}
+		}
+	case "j", "down":
+		if len(m.destHosts) > 0 && m.progressCursor < len(m.destHosts)-1 {
+			m.progressCursor++
+		}
+	case "k", "up":
+		if m.progressCursor > 0 {
+			m.progressCursor--
+		}
 	case "r":
 		// Only allow retry after execution has fully completed and there are
 		// failed hosts to retry.
@@ -1281,9 +1322,6 @@ func (m DistributeModel) handleExecuteKey(msg tea.KeyMsg) (DistributeModel, tea.
 				// When this model was itself created by a retry (m.retryParams !=
 				// nil), preserve the original AllHosts from the parent retry params
 				// so that hub-first ordering remains correct across multiple retries.
-				// In hub-and-spoke mode, AllHosts[0] is always the original hub;
-				// m.destHosts only contains the previously-failed hosts, which may
-				// not include the hub if it succeeded in the prior round.
 				allHosts := append([]config.ResolvedHost(nil), m.destHosts...)
 				if m.retryParams != nil && len(m.retryParams.AllHosts) > 0 {
 					allHosts = append([]config.ResolvedHost(nil), m.retryParams.AllHosts...)
