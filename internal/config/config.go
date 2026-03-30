@@ -23,6 +23,11 @@ const ExampleConfig = `clusters:
       - web-02.example.com
       - name: db-01.example.com
         user: postgres
+      # internal_ip is optional. When set, all SSH/SCP connections to this
+      # host use the internal IP instead of the hostname/public address.
+      # Useful for hub-and-spoke mode where spokes are on a private network.
+      # - name: spoke-01.example.com
+      #   internal_ip: 10.0.0.11
   staging:
     defaults:
       user: ubuntu
@@ -116,6 +121,17 @@ func (c *Config) EffectiveConfirmThreshold() int {
 	return 50
 }
 
+// EffectiveAddress returns InternalIP if set, otherwise Host.
+// Use this instead of Host for SSH/SCP target address construction
+// so that hosts with an internal_ip config field are reached via
+// their internal address.
+func (h ResolvedHost) EffectiveAddress() string {
+	if h.InternalIP != "" {
+		return h.InternalIP
+	}
+	return h.Host
+}
+
 // Keybindings holds configurable tmux key bindings.
 type Keybindings struct {
 	BroadcastToggle KeyBinding `yaml:"broadcast_toggle"`
@@ -163,6 +179,7 @@ type HostEntry struct {
 	Port       int
 	Key        string
 	JumpHost   string
+	InternalIP string
 	Provenance Provenance
 }
 
@@ -174,11 +191,12 @@ func (h *HostEntry) UnmarshalYAML(value *yaml.Node) error {
 		return nil
 	}
 	var obj struct {
-		Name     string `yaml:"name"`
-		User     string `yaml:"user"`
-		Port     int    `yaml:"port"`
-		Key      string `yaml:"key"`
-		JumpHost string `yaml:"jump_host"`
+		Name       string `yaml:"name"`
+		User       string `yaml:"user"`
+		Port       int    `yaml:"port"`
+		Key        string `yaml:"key"`
+		JumpHost   string `yaml:"jump_host"`
+		InternalIP string `yaml:"internal_ip"`
 	}
 	if err := value.Decode(&obj); err != nil {
 		return err
@@ -188,6 +206,7 @@ func (h *HostEntry) UnmarshalYAML(value *yaml.Node) error {
 	h.Port = obj.Port
 	h.Key = obj.Key
 	h.JumpHost = obj.JumpHost
+	h.InternalIP = obj.InternalIP
 	h.Provenance = ProvenanceFull
 	return nil
 }
@@ -202,6 +221,7 @@ type ResolvedHost struct {
 	Port         int
 	Key          string
 	JumpHost     string
+	InternalIP   string
 	ClusterNames []string // all cluster names this host belongs to
 	Provenance   Provenance
 }
@@ -231,6 +251,7 @@ func (h *HostEntry) Resolve(clusterName string, defaults HostDefaults) ResolvedH
 		Port:         port,
 		Key:          key,
 		JumpHost:     jumpHost,
+		InternalIP:   h.InternalIP,
 		ClusterNames: []string{clusterName},
 		Provenance:   h.Provenance,
 	}
