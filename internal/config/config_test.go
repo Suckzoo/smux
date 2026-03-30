@@ -496,6 +496,64 @@ func TestExampleConfigLargeSelectionThresholdIsValidYAML(t *testing.T) {
 	}
 }
 
+// TestInternalIPUnmarshalYAML verifies that the internal_ip field is decoded
+// from the object form of a host entry.
+func TestInternalIPUnmarshalYAML(t *testing.T) {
+	type clusterHosts struct {
+		Hosts []HostEntry `yaml:"hosts"`
+	}
+	input := `
+hosts:
+  - name: spoke-01.example.com
+    internal_ip: 10.0.0.1
+  - web-01.example.com
+`
+	var ch clusterHosts
+	if err := yaml.Unmarshal([]byte(input), &ch); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(ch.Hosts) != 2 {
+		t.Fatalf("expected 2 hosts, got %d", len(ch.Hosts))
+	}
+	if ch.Hosts[0].InternalIP != "10.0.0.1" {
+		t.Errorf("InternalIP: got %q, want %q", ch.Hosts[0].InternalIP, "10.0.0.1")
+	}
+	if ch.Hosts[1].InternalIP != "" {
+		t.Errorf("alias host InternalIP: got %q, want empty", ch.Hosts[1].InternalIP)
+	}
+}
+
+// TestInternalIPResolve verifies that Resolve() copies InternalIP into ResolvedHost.
+func TestInternalIPResolve(t *testing.T) {
+	entry := HostEntry{
+		Name:       "spoke-01.example.com",
+		InternalIP: "10.0.0.1",
+		Provenance: ProvenanceFull,
+	}
+	resolved := entry.Resolve("prod", HostDefaults{User: "ubuntu"})
+	if resolved.InternalIP != "10.0.0.1" {
+		t.Errorf("InternalIP: got %q, want %q", resolved.InternalIP, "10.0.0.1")
+	}
+}
+
+// TestEffectiveAddress_WithInternalIP verifies that EffectiveAddress returns
+// InternalIP when it is set.
+func TestEffectiveAddress_WithInternalIP(t *testing.T) {
+	h := ResolvedHost{Host: "spoke-01.example.com", InternalIP: "10.0.0.1"}
+	if got := h.EffectiveAddress(); got != "10.0.0.1" {
+		t.Errorf("EffectiveAddress: got %q, want %q", got, "10.0.0.1")
+	}
+}
+
+// TestEffectiveAddress_WithoutInternalIP verifies that EffectiveAddress falls
+// back to Host when InternalIP is empty.
+func TestEffectiveAddress_WithoutInternalIP(t *testing.T) {
+	h := ResolvedHost{Host: "web-01.example.com"}
+	if got := h.EffectiveAddress(); got != "web-01.example.com" {
+		t.Errorf("EffectiveAddress: got %q, want %q", got, "web-01.example.com")
+	}
+}
+
 // TestAllClustersForHostSingleCluster verifies that AllClustersForHost returns
 // a slice of length 1 when the alias exists in exactly one cluster.
 func TestAllClustersForHostSingleCluster(t *testing.T) {

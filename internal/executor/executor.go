@@ -164,9 +164,9 @@ func buildSCPArgs(
 
 	// Source argument.
 	if isRemoteSrc {
-		srcAddr := src.Host
+		srcAddr := src.EffectiveAddress()
 		if src.User != "" {
-			srcAddr = src.User + "@" + src.Host
+			srcAddr = src.User + "@" + src.EffectiveAddress()
 		}
 		args = append(args, srcAddr+":"+srcPath)
 	} else {
@@ -174,9 +174,9 @@ func buildSCPArgs(
 	}
 
 	// Destination argument: [user@]host:path
-	dstAddr := dst.Host
+	dstAddr := dst.EffectiveAddress()
 	if dst.User != "" {
-		dstAddr = dst.User + "@" + dst.Host
+		dstAddr = dst.User + "@" + dst.EffectiveAddress()
 	}
 	args = append(args, dstAddr+":"+dstPath)
 

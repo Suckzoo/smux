@@ -58,7 +58,13 @@ type RemoteFlatNode struct {
 	IsPlaceholder bool
 	// PlaceholderKind is "loading" or "error" when IsPlaceholder is true.
 	PlaceholderKind string
+	// IsParentDir is true for the synthetic ".." navigation entry at the top
+	// of each directory listing.  The entry is focusable but not selectable.
+	IsParentDir bool
 }
+
+// parentDirSentinel is the RemotePath value used for the ".." navigation entry.
+const parentDirSentinel = "./__parentdir__"
 
 // ---------------------------------------------------------------------------
 // RemoteFileTreeModel — bubbletea model for the remote file-tree browser
@@ -74,11 +80,16 @@ type RemoteFlatNode struct {
 // While a listing is in-flight a "(loading…)" placeholder appears; if the
 // fetch fails an "(error: …)" placeholder is shown instead.
 //
+// The user can navigate up to parent directories via the ".." entry at the top
+// of each listing.  currentRoot tracks the path currently acting as the tree
+// root; it starts at "." (the home directory) and may be changed to "..",
+// "../..", or deeper ancestor paths as the user navigates upward.
+//
 // Keybindings mirror FileTreeModel:
 //
 //	↑/k          move cursor up
 //	↓/j          move cursor down
-//	→/l/Enter    expand directory (triggers SSH fetch if not cached)
+//	→/l/Enter    expand directory (triggers SSH fetch if not cached) or navigate up via ".."
 //	←/h          collapse directory or move cursor up
 //	Space        select/deselect the entry under the cursor
 //	.            toggle display of hidden files
@@ -87,6 +98,12 @@ type RemoteFlatNode struct {
 //	Ctrl+D       confirm the current selection and advance
 type RemoteFileTreeModel struct {
 	host config.ResolvedHost // remote host to browse
+
+	// currentRoot is the path of the directory currently acting as the tree
+	// root.  It starts as "." (home directory) and changes when the user
+	// navigates up via the ".." entry.  Paths are relative to the remote home
+	// directory; paths above home use ".." notation (e.g. "..", "../..").
+	currentRoot string
 
 	// dirCache holds the fetched entries for each remote path.
 	// The home directory uses the key ".".
@@ -120,12 +137,13 @@ type RemoteFileTreeModel struct {
 // The home directory listing is requested on Init().
 func NewRemoteFileTreeModel(host config.ResolvedHost) RemoteFileTreeModel {
 	m := RemoteFileTreeModel{
-		host:       host,
-		dirCache:   make(map[string][]filetree.FileEntry),
-		loading:    make(map[string]bool),
-		loadErrors: make(map[string]string),
-		expanded:   make(map[string]bool),
-		selected:   make(map[string]bool),
+		host:        host,
+		currentRoot: ".",
+		dirCache:    make(map[string][]filetree.FileEntry),
+		loading:     make(map[string]bool),
+		loadErrors:  make(map[string]string),
+		expanded:    make(map[string]bool),
+		selected:    make(map[string]bool),
 	}
 	// The home dir is marked as expanded so its contents appear once loaded.
 	m.expanded["."] = true
@@ -146,7 +164,7 @@ func (m RemoteFileTreeModel) GetResult() FileTreeResult { return m.result }
 
 // Init implements tea.Model. Triggers the initial home directory fetch.
 func (m RemoteFileTreeModel) Init() tea.Cmd {
-	return fetchDirCmd(m.host, ".")
+	return fetchDirCmd(m.host, m.currentRoot)
 }
 
 // fetchDirCmd returns a tea.Cmd that lists remotePath on host, delivering
@@ -244,11 +262,16 @@ func (m RemoteFileTreeModel) handleKey(msg tea.KeyMsg) (RemoteFileTreeModel, tea
 // expandOrOpen expands or collapses the directory under the cursor.
 // If the directory has no cached listing and is not already loading, it
 // triggers a fetch and returns the corresponding tea.Cmd.
+// When the cursor is on the ".." parent-dir entry, the view navigates up to
+// the parent of the current root directory.
 func (m *RemoteFileTreeModel) expandOrOpen() tea.Cmd {
 	if m.cursor >= len(m.flatNodes) {
 		return nil
 	}
 	n := m.flatNodes[m.cursor]
+	if n.IsParentDir {
+		return m.navigateUp()
+	}
 	if !n.IsDir || n.IsPlaceholder {
 		return nil
 	}
@@ -277,14 +300,86 @@ func (m *RemoteFileTreeModel) expandOrOpen() tea.Cmd {
 	return cmd
 }
 
+// navigateUp changes the current root to the parent directory and triggers a
+// remote fetch if the parent listing has not yet been cached.
+// At the filesystem root ("/") no navigation occurs (no-op).
+func (m *RemoteFileTreeModel) navigateUp() tea.Cmd {
+	parent := remoteParentPath(m.currentRoot)
+	if parent == m.currentRoot {
+		// Already at filesystem root — no-op.
+		return nil
+	}
+	m.currentRoot = parent
+	m.cursor = 0
+	m.yOffset = 0
+	var cmd tea.Cmd
+	if _, cached := m.dirCache[parent]; !cached && !m.loading[parent] {
+		m.loading[parent] = true
+		cmd = fetchDirCmd(m.host, parent)
+	}
+	m.rebuild()
+	return cmd
+}
+
+// remoteParentPath returns the path of the parent directory for a remote path
+// that is relative to the home directory. Special cases:
+//
+//   - "/"   → "/"      (filesystem root is its own parent — no-op sentinel)
+//   - "."   → ".."     (parent of home directory)
+//   - ".."  → "../.."  (pure traversal — extend upward)
+//   - "../.." → "../../.." (pure traversal — extend upward)
+//
+// For pure traversal paths (all components are ".."), the path is extended
+// by appending "/.." because path.Dir gives wrong results for them
+// (path.Dir("../..") = ".." not "../../..").
+//
+// For normal sub-paths like "Documents" or "Documents/Work", path.Dir
+// produces the correct result.
+func remoteParentPath(p string) string {
+	if p == "/" {
+		return "/" // filesystem root — caller treats this as no-op
+	}
+	if p == "." {
+		return ".."
+	}
+	// For pure traversal paths (every component is ".."), extend upward by
+	// appending "/.." directly.  path.Dir cannot be used here because it
+	// simplifies "../../.." to "../.." rather than leaving the traversal intact.
+	if isOnlyDotDots(p) {
+		return p + "/.."
+	}
+	// path.Dir handles normal sub-paths correctly:
+	//   path.Dir("Documents") = "."            ✓ (back to home)
+	//   path.Dir("Documents/Work") = "Documents" ✓
+	//   path.Dir("/foo") = "/"                 ✓
+	//   path.Dir("/foo/bar") = "/foo"          ✓
+	return path.Dir(p)
+}
+
+// isOnlyDotDots reports whether every path component of p is "..".
+// For example "..", "../..", "../../.." all return true.
+func isOnlyDotDots(p string) bool {
+	if p == "" {
+		return false
+	}
+	for _, component := range strings.Split(p, "/") {
+		if component != ".." {
+			return false
+		}
+	}
+	return true
+}
+
 // collapseOrMoveUp collapses an expanded directory under the cursor, or moves
 // the cursor up when the current entry is not an expanded directory.
+// The ".." parent-dir entry is never expanded, so pressing ← on it just moves
+// the cursor up (no-op at the top of the list).
 func (m *RemoteFileTreeModel) collapseOrMoveUp() {
 	if m.cursor >= len(m.flatNodes) {
 		return
 	}
 	n := m.flatNodes[m.cursor]
-	if n.IsDir && !n.IsPlaceholder && m.expanded[n.RemotePath] {
+	if n.IsDir && !n.IsPlaceholder && !n.IsParentDir && m.expanded[n.RemotePath] {
 		m.expanded[n.RemotePath] = false
 		m.rebuild()
 		return
@@ -296,13 +391,14 @@ func (m *RemoteFileTreeModel) collapseOrMoveUp() {
 }
 
 // toggleSelect selects or deselects the node under the cursor.
-// Placeholder nodes (loading/error) cannot be selected.
+// Placeholder nodes (loading/error) and the ".." parent-dir entry cannot be
+// selected.
 func (m *RemoteFileTreeModel) toggleSelect() {
 	if m.cursor >= len(m.flatNodes) {
 		return
 	}
 	n := m.flatNodes[m.cursor]
-	if n.IsPlaceholder {
+	if n.IsPlaceholder || n.IsParentDir {
 		return
 	}
 	if m.selected[n.RemotePath] {
@@ -333,28 +429,49 @@ func (m *RemoteFileTreeModel) rebuild() {
 	}
 }
 
-// buildFlatNodes constructs the full visible node list starting from the home
-// directory. Special-cases the root loading/error state.
+// buildFlatNodes constructs the full visible node list starting from the
+// current root directory (m.currentRoot). Special-cases the root loading/error
+// state. A ".." navigation entry is always prepended at the top of the list.
 func (m *RemoteFileTreeModel) buildFlatNodes() []RemoteFlatNode {
-	if m.loading["."] {
-		return []RemoteFlatNode{{
-			Name:            "(loading…)",
-			RemotePath:      "./__loading__",
-			Depth:           0,
-			IsPlaceholder:   true,
-			PlaceholderKind: "loading",
-		}}
+	root := m.currentRoot
+	if root == "" {
+		root = "."
 	}
-	if errMsg, hasErr := m.loadErrors["."]; hasErr {
-		return []RemoteFlatNode{{
-			Name:            fmt.Sprintf("(error: %s)", errMsg),
-			RemotePath:      "./__error__",
-			Depth:           0,
-			IsPlaceholder:   true,
-			PlaceholderKind: "error",
-		}}
+
+	// Always show the ".." entry at the top so users can navigate up.
+	parentEntry := RemoteFlatNode{
+		Name:        "..",
+		RemotePath:  parentDirSentinel,
+		IsDir:       true,
+		IsParentDir: true,
+		Depth:       0,
 	}
-	return m.buildFlatList(".", 0)
+
+	if m.loading[root] {
+		return []RemoteFlatNode{
+			parentEntry,
+			{
+				Name:            "(loading…)",
+				RemotePath:      root + "/__loading__",
+				Depth:           0,
+				IsPlaceholder:   true,
+				PlaceholderKind: "loading",
+			},
+		}
+	}
+	if errMsg, hasErr := m.loadErrors[root]; hasErr {
+		return []RemoteFlatNode{
+			parentEntry,
+			{
+				Name:            fmt.Sprintf("(error: %s)", errMsg),
+				RemotePath:      root + "/__error__",
+				Depth:           0,
+				IsPlaceholder:   true,
+				PlaceholderKind: "error",
+			},
+		}
+	}
+	return append([]RemoteFlatNode{parentEntry}, m.buildFlatList(root, 0)...)
 }
 
 // buildFlatList recursively builds the visible flat node list for the given
@@ -509,6 +626,7 @@ func (m RemoteFileTreeModel) View() string {
 // renderRemoteFileList returns one rendered line per visible RemoteFlatNode.
 func (m RemoteFileTreeModel) renderRemoteFileList() []string {
 	dirStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("14"))
+	parentDirStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
 	selectedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
 	hiddenStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	errorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
@@ -524,6 +642,19 @@ func (m RemoteFileTreeModel) renderRemoteFileList() []string {
 		indent := strings.Repeat("  ", n.Depth)
 
 		var text string
+
+		// Render the ".." parent-directory navigation entry.
+		if n.IsParentDir {
+			text = indent + "  " + n.Name
+			var line string
+			if isCursor {
+				line = cursorStyle.Render(padRight(text, m.width))
+			} else {
+				line = parentDirStyle.Render(text)
+			}
+			lines = append(lines, line)
+			continue
+		}
 
 		if n.IsPlaceholder {
 			text = indent + "  " + n.Name

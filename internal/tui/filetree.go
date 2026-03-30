@@ -23,6 +23,8 @@ const (
 	FileNodeKindDir FileNodeKind = iota
 	// FileNodeKindFile represents a selectable file entry.
 	FileNodeKindFile
+	// FileNodeKindParentDir represents the ".." parent-navigation entry.
+	FileNodeKindParentDir
 )
 
 // ---------------------------------------------------------------------------
@@ -44,6 +46,9 @@ func (n FileTreeNode) IsDir() bool { return n.Kind == FileNodeKindDir }
 
 // IsFile reports whether this node represents a regular file.
 func (n FileTreeNode) IsFile() bool { return n.Kind == FileNodeKindFile }
+
+// IsParentDir reports whether this node is the special ".." parent-navigation entry.
+func (n FileTreeNode) IsParentDir() bool { return n.Kind == FileNodeKindParentDir }
 
 // ---------------------------------------------------------------------------
 // FileTreeExpandedState — tracks which directories are open
@@ -321,12 +326,28 @@ func (m FileTreeModel) handleKey(msg tea.KeyMsg) (FileTreeModel, tea.Cmd) {
 }
 
 // expandOrOpen expands the directory under the cursor (if collapsed), or
-// collapses it (if already expanded).  Has no effect on file nodes.
+// collapses it (if already expanded).  When the cursor is on the ".." entry
+// the view navigates to the parent directory.  Has no effect on file nodes.
 func (m *FileTreeModel) expandOrOpen() {
 	if m.cursor >= len(m.flatNodes) {
 		return
 	}
 	n := m.flatNodes[m.cursor]
+	if n.IsParentDir() {
+		// Navigate to the parent directory.  filepath.Dir("/") == "/" so this
+		// is a safe no-op at the filesystem root.
+		parent := filepath.Dir(m.RootPath)
+		if parent == m.RootPath {
+			// Already at filesystem root — nothing to navigate to.
+			return
+		}
+		m.RootPath = parent
+		m.cursor = 0
+		m.yOffset = 0
+		m.state = NewFileTreeExpandedState()
+		m.rebuild()
+		return
+	}
 	if n.IsDir() {
 		m.state.Toggle(n.FullPath)
 		m.rebuild()
@@ -352,11 +373,16 @@ func (m *FileTreeModel) collapseOrMoveUp() {
 }
 
 // toggleSelect selects or deselects the node under the cursor.
+// The ".." parent-navigation entry is not selectable.
 func (m *FileTreeModel) toggleSelect() {
 	if m.cursor >= len(m.flatNodes) {
 		return
 	}
-	p := m.flatNodes[m.cursor].FullPath
+	n := m.flatNodes[m.cursor]
+	if n.IsParentDir() {
+		return
+	}
+	p := n.FullPath
 	if m.selected[p] {
 		delete(m.selected, p)
 	} else {
@@ -375,8 +401,23 @@ func (m *FileTreeModel) sortedSelected() []string {
 }
 
 // rebuild regenerates the flat node list from the current expanded state.
+// A ".." parent-navigation entry is always prepended at index 0.
 func (m *FileTreeModel) rebuild() {
-	m.flatNodes = BuildFlatFileList(m.RootPath, &m.state, m.showHidden)
+	entries := BuildFlatFileList(m.RootPath, &m.state, m.showHidden)
+
+	// Determine the parent path for the ".." entry.
+	// filepath.Dir("/") == "/" so at root the entry still appears but navigates nowhere.
+	parentPath := filepath.Dir(m.RootPath)
+	parentEntry := FlatFileNode{
+		FileTreeNode: FileTreeNode{
+			Kind:     FileNodeKindParentDir,
+			Name:     "..",
+			FullPath: parentPath,
+		},
+		Depth: 0,
+	}
+	m.flatNodes = append([]FlatFileNode{parentEntry}, entries...)
+
 	if m.cursor >= len(m.flatNodes) && len(m.flatNodes) > 0 {
 		m.cursor = len(m.flatNodes) - 1
 	}
@@ -478,7 +519,12 @@ func (m FileTreeModel) renderFileList() []string {
 		isSelected := m.selected[n.FullPath]
 
 		var prefix, name string
-		if n.IsDir() {
+		if n.IsParentDir() {
+			// The ".." entry always appears at depth 0 with an up-arrow indicator.
+			// It is not selectable, so no checkmark is shown.
+			prefix = "↑ "
+			name = "../"
+		} else if n.IsDir() {
 			arrow := "▶"
 			if m.state.IsExpanded(n.FullPath) {
 				arrow = "▼"
@@ -510,6 +556,9 @@ func (m FileTreeModel) renderFileList() []string {
 		switch {
 		case isCursor:
 			line = cursorStyle.Render(padRight(text, m.width))
+		case n.IsParentDir():
+			// ".." entry rendered with dim/muted style to distinguish from real entries.
+			line = hiddenStyle.Render(text)
 		case isSelected:
 			line = selectedStyle.Render(text)
 		case n.IsDir() && !n.IsHidden:

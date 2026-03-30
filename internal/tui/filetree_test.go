@@ -352,10 +352,18 @@ func TestFileTreeModelExpandCollapseViaEnter(t *testing.T) {
 	m.width = 80
 	m.height = 24
 
-	// Cursor starts at the directory (it's first in the list).
-	if len(m.flatNodes) == 0 || !m.flatNodes[0].IsDir() {
-		t.Skip("first node is not a directory — skipping expand test")
+	// Find the first real directory (index 0 is always the ".." entry).
+	dirIdx := -1
+	for i, n := range m.flatNodes {
+		if n.IsDir() {
+			dirIdx = i
+			break
+		}
 	}
+	if dirIdx < 0 {
+		t.Skip("no directory node found — skipping expand test")
+	}
+	m.cursor = dirIdx
 	initialCount := len(m.flatNodes)
 
 	// Expand.
@@ -380,9 +388,18 @@ func TestFileTreeModelExpandViaRightKey(t *testing.T) {
 	m.width = 80
 	m.height = 24
 
-	if len(m.flatNodes) == 0 || !m.flatNodes[0].IsDir() {
-		t.Skip("first node is not a directory")
+	// Find the first real directory (index 0 is always the ".." entry).
+	dirIdx := -1
+	for i, n := range m.flatNodes {
+		if n.IsDir() {
+			dirIdx = i
+			break
+		}
 	}
+	if dirIdx < 0 {
+		t.Skip("no directory node found")
+	}
+	m.cursor = dirIdx
 	initialCount := len(m.flatNodes)
 
 	m, _ = sendFileTreeKey(m, "l")
@@ -400,9 +417,18 @@ func TestFileTreeModelCollapseViaLeftKey(t *testing.T) {
 	m.width = 80
 	m.height = 24
 
-	if len(m.flatNodes) == 0 || !m.flatNodes[0].IsDir() {
-		t.Skip("first node is not a directory")
+	// Find the first real directory (index 0 is always the ".." entry).
+	dirIdx := -1
+	for i, n := range m.flatNodes {
+		if n.IsDir() {
+			dirIdx = i
+			break
+		}
 	}
+	if dirIdx < 0 {
+		t.Skip("no directory node found")
+	}
+	m.cursor = dirIdx
 
 	// Expand the directory first.
 	m, _ = sendFileTreeKey(m, "enter")
@@ -666,10 +692,18 @@ func TestFileTreeModelViewFileIndentation(t *testing.T) {
 	m.width = 120
 	m.height = 30
 
-	// Expand subdir.
-	if len(m.flatNodes) == 0 || !m.flatNodes[0].IsDir() {
-		t.Skip("first node is not a directory")
+	// Find the first real directory (index 0 is always the ".." entry) and expand it.
+	dirIdx := -1
+	for i, n := range m.flatNodes {
+		if n.IsDir() {
+			dirIdx = i
+			break
+		}
 	}
+	if dirIdx < 0 {
+		t.Skip("no directory node found")
+	}
+	m.cursor = dirIdx
 	m, _ = sendFileTreeKey(m, "enter")
 
 	lines := m.renderFileList()
@@ -1003,6 +1037,790 @@ func TestFileTreeModelDirSelectionIndependentOfExpansion(t *testing.T) {
 	}
 	if m.state.IsExpanded(dirPath) {
 		t.Error("Space on a directory should not expand it — selection and expansion are independent")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Parent-directory navigation entry tests
+// ---------------------------------------------------------------------------
+
+// TestFileTreeModelParentDirEntryAtTop verifies that the ".." entry always
+// appears as the first item in the flat node list.
+func TestFileTreeModelParentDirEntryAtTop(t *testing.T) {
+	root := makeTestDir(t)
+	m := NewFileTreeModel(root)
+	m.width = 80
+	m.height = 24
+
+	if len(m.flatNodes) == 0 {
+		t.Fatal("flatNodes should be non-empty")
+	}
+	first := m.flatNodes[0]
+	if !first.IsParentDir() {
+		t.Errorf("first flatNode should be the '..' parent-dir entry, got Kind=%v Name=%q", first.Kind, first.Name)
+	}
+	if first.Name != ".." {
+		t.Errorf("parent-dir entry Name should be '..', got %q", first.Name)
+	}
+}
+
+// TestFileTreeModelParentDirEntryInView verifies that the ".." entry is
+// visible in the rendered View output.
+func TestFileTreeModelParentDirEntryInView(t *testing.T) {
+	root := makeTestDir(t)
+	m := NewFileTreeModel(root)
+	m.width = 120
+	m.height = 30
+
+	view := m.View()
+	if !strings.Contains(view, "..") {
+		t.Errorf("view should contain the '..' parent-navigation entry, got:\n%s", view)
+	}
+}
+
+// TestFileTreeModelParentDirEntryPresentAfterToggleHidden verifies that the
+// ".." entry remains at the top even after toggling hidden file visibility.
+func TestFileTreeModelParentDirEntryPresentAfterToggleHidden(t *testing.T) {
+	root := makeTestDir(t)
+	m := NewFileTreeModel(root)
+	m.width = 80
+	m.height = 24
+
+	// Toggle hidden on.
+	m, _ = sendFileTreeKey(m, ".")
+	if len(m.flatNodes) == 0 || !m.flatNodes[0].IsParentDir() {
+		t.Error("'..' entry should still be at index 0 after toggling hidden files on")
+	}
+
+	// Toggle hidden off.
+	m, _ = sendFileTreeKey(m, ".")
+	if len(m.flatNodes) == 0 || !m.flatNodes[0].IsParentDir() {
+		t.Error("'..' entry should still be at index 0 after toggling hidden files off")
+	}
+}
+
+// TestFileTreeModelParentDirNotSelectable verifies that pressing Space on the
+// ".." entry does not add it to the selection map.
+func TestFileTreeModelParentDirNotSelectable(t *testing.T) {
+	root := makeTestDir(t)
+	m := NewFileTreeModel(root)
+	m.width = 80
+	m.height = 24
+
+	// Cursor starts at ".." (index 0).
+	if len(m.flatNodes) == 0 || !m.flatNodes[0].IsParentDir() {
+		t.Skip("first node is not the '..' parent-dir entry")
+	}
+	m.cursor = 0
+	parentPath := m.flatNodes[0].FullPath
+
+	m, _ = sendFileTreeKey(m, " ")
+	if m.selected[parentPath] {
+		t.Error("pressing Space on the '..' entry should not add it to the selection map")
+	}
+	if len(m.selected) != 0 {
+		t.Errorf("selection map should be empty after Space on '..', got %v", m.selected)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Parent-directory navigation tests (AC 3) — local FileTreeModel
+// ---------------------------------------------------------------------------
+
+// TestFileTreeModelNavigateUpViaEnter verifies that pressing Enter when the
+// cursor is on the ".." entry changes RootPath to the parent directory.
+func TestFileTreeModelNavigateUpViaEnter(t *testing.T) {
+	root := makeTestDir(t)
+	m := NewFileTreeModel(root)
+	m.width = 80
+	m.height = 24
+
+	if len(m.flatNodes) == 0 || !m.flatNodes[0].IsParentDir() {
+		t.Skip("first node is not the '..' parent-dir entry")
+	}
+
+	originalRoot := m.RootPath
+	expectedParent := filepath.Dir(originalRoot)
+
+	// Cursor is already at index 0 (..) after construction.
+	m, _ = sendFileTreeKey(m, "enter")
+
+	if m.RootPath == originalRoot {
+		t.Errorf("Enter on '..' should change RootPath from %q to %q, but it stayed the same",
+			originalRoot, expectedParent)
+	}
+	if m.RootPath != expectedParent {
+		t.Errorf("RootPath after navigating up should be %q, got %q", expectedParent, m.RootPath)
+	}
+}
+
+// TestFileTreeModelNavigateUpViaRightKey verifies that the 'l' key also
+// triggers parent navigation when on the ".." entry.
+func TestFileTreeModelNavigateUpViaRightKey(t *testing.T) {
+	root := makeTestDir(t)
+	m := NewFileTreeModel(root)
+	m.width = 80
+	m.height = 24
+
+	if len(m.flatNodes) == 0 || !m.flatNodes[0].IsParentDir() {
+		t.Skip("first node is not the '..' parent-dir entry")
+	}
+
+	originalRoot := m.RootPath
+	m, _ = sendFileTreeKey(m, "l")
+
+	if m.RootPath == originalRoot {
+		t.Errorf("'l' on '..' entry should navigate up, but RootPath remained %q", originalRoot)
+	}
+}
+
+// TestFileTreeModelNavigateUpChangesContents verifies that after navigating up,
+// the flat node list includes the original directory as a child entry.
+func TestFileTreeModelNavigateUpChangesContents(t *testing.T) {
+	root := makeTestDir(t)
+	m := NewFileTreeModel(root)
+	m.width = 80
+	m.height = 24
+
+	if len(m.flatNodes) == 0 || !m.flatNodes[0].IsParentDir() {
+		t.Skip("first node is not the '..' parent-dir entry")
+	}
+
+	m, _ = sendFileTreeKey(m, "enter")
+
+	if len(m.flatNodes) == 0 {
+		t.Fatal("flatNodes should be non-empty after navigating to parent")
+	}
+	// The listing must still start with a ".." entry.
+	if !m.flatNodes[0].IsParentDir() {
+		t.Errorf("after navigating up, flatNodes[0] should still be '..' entry, got %+v", m.flatNodes[0])
+	}
+	// The original test root (a temp dir) should appear as a child entry.
+	found := false
+	for _, n := range m.flatNodes {
+		if n.FullPath == root {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("original root dir %q should appear in parent listing; got nodes: %v",
+			root, nodeNames(m.flatNodes))
+	}
+}
+
+// TestFileTreeModelNavigateUpCursorResets verifies that after navigating up
+// the cursor resets to index 0 (the ".." entry of the new directory).
+func TestFileTreeModelNavigateUpCursorResets(t *testing.T) {
+	root := makeTestDir(t)
+	m := NewFileTreeModel(root)
+	m.width = 80
+	m.height = 24
+
+	if len(m.flatNodes) == 0 || !m.flatNodes[0].IsParentDir() {
+		t.Skip("first node is not the '..' parent-dir entry")
+	}
+	// Cursor starts at 0 already; navigate up.
+	m, _ = sendFileTreeKey(m, "enter")
+
+	if m.cursor != 0 {
+		t.Errorf("cursor should be reset to 0 after navigating up, got %d", m.cursor)
+	}
+}
+
+// TestFileTreeModelNavigateUpPreservesSelections verifies that selections made
+// in a child directory are preserved in the selected map after navigating up.
+func TestFileTreeModelNavigateUpPreservesSelections(t *testing.T) {
+	root := makeTestDir(t)
+	m := NewFileTreeModel(root)
+	m.width = 80
+	m.height = 24
+
+	if len(m.flatNodes) == 0 || !m.flatNodes[0].IsParentDir() {
+		t.Skip("first node is not the '..' parent-dir entry")
+	}
+
+	// Select a file before navigating up.
+	var selectedPath string
+	for i, n := range m.flatNodes {
+		if n.IsFile() {
+			m.cursor = i
+			selectedPath = n.FullPath
+			break
+		}
+	}
+	if selectedPath == "" {
+		t.Skip("no file node found")
+	}
+	m, _ = sendFileTreeKey(m, " ") // select the file
+	if !m.selected[selectedPath] {
+		t.Fatal("file should be selected before navigation")
+	}
+
+	// Navigate up from the ".." entry at index 0.
+	m.cursor = 0
+	m, _ = sendFileTreeKey(m, "enter")
+
+	if !m.selected[selectedPath] {
+		t.Errorf("selection for %q should be preserved after navigating up, but it was lost", selectedPath)
+	}
+}
+
+// TestFileTreeModelNavigateUpNoOpAtRoot verifies that pressing Enter on ".."
+// when already at filesystem root "/" does not change RootPath.
+func TestFileTreeModelNavigateUpNoOpAtRoot(t *testing.T) {
+	m := NewFileTreeModel("/")
+	m.width = 80
+	m.height = 24
+
+	if len(m.flatNodes) == 0 || !m.flatNodes[0].IsParentDir() {
+		t.Skip("first node is not the '..' parent-dir entry")
+	}
+	m.cursor = 0
+
+	m, _ = sendFileTreeKey(m, "enter")
+
+	if m.RootPath != "/" {
+		t.Errorf("navigating up from '/' should be a no-op, but RootPath changed to %q", m.RootPath)
+	}
+}
+
+// TestFileTreeModelParentDirEntryAtRootIsNoOp verifies the ".." entry is
+// present even when already at "/" and that it acts as a no-op.
+func TestFileTreeModelParentDirEntryAtRootIsNoOp(t *testing.T) {
+	m := NewFileTreeModel("/")
+	m.width = 80
+	m.height = 24
+
+	if len(m.flatNodes) == 0 {
+		t.Fatal("flatNodes should be non-empty at '/'")
+	}
+	if !m.flatNodes[0].IsParentDir() {
+		t.Errorf("flatNodes[0] should be '..' even at filesystem root, got %+v", m.flatNodes[0])
+	}
+
+	// Pressing enter at root should be a no-op.
+	m.cursor = 0
+	m, _ = sendFileTreeKey(m, "enter")
+	if m.RootPath != "/" {
+		t.Errorf("RootPath should remain '/' after no-op, got %q", m.RootPath)
+	}
+}
+
+// TestFileTreeModelExpandDirStillWorksAfterParentEntry verifies that real
+// directory expand/collapse still functions correctly with ".." at index 0.
+func TestFileTreeModelExpandDirStillWorksAfterParentEntry(t *testing.T) {
+	root := makeTestDir(t)
+	m := NewFileTreeModel(root)
+	m.width = 80
+	m.height = 24
+
+	// Find the first real directory node (skip ".." at index 0).
+	dirIdx := -1
+	for i, n := range m.flatNodes {
+		if n.IsDir() {
+			dirIdx = i
+			break
+		}
+	}
+	if dirIdx < 0 {
+		t.Skip("no real directory node found")
+	}
+
+	m.cursor = dirIdx
+	initialCount := len(m.flatNodes)
+
+	// Expand the directory.
+	m, _ = sendFileTreeKey(m, "enter")
+	if len(m.flatNodes) <= initialCount {
+		t.Errorf("Enter on a real directory should increase node count; before=%d after=%d",
+			initialCount, len(m.flatNodes))
+	}
+
+	// Collapse the directory.
+	m, _ = sendFileTreeKey(m, "enter")
+	if len(m.flatNodes) != initialCount {
+		t.Errorf("second Enter should collapse directory and restore count to %d, got %d",
+			initialCount, len(m.flatNodes))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// AC 5 — Navigate from initial root all the way to "/"
+// ---------------------------------------------------------------------------
+
+// TestFileTreeModelCanNavigateToFilesystemRoot verifies that repeatedly
+// pressing Enter on the ".." entry will eventually change RootPath to "/".
+// This confirms that there is no artificial upper boundary on parent navigation.
+func TestFileTreeModelCanNavigateToFilesystemRoot(t *testing.T) {
+	// Use the TempDir — which is always somewhere inside the real filesystem —
+	// as the starting point.  Navigating up from there must reach "/".
+	root := t.TempDir()
+	m := NewFileTreeModel(root)
+	m.width = 80
+	m.height = 24
+
+	const maxSteps = 100 // prevent infinite loop if something goes wrong
+	for i := 0; i < maxSteps; i++ {
+		if m.RootPath == "/" {
+			return // success — reached filesystem root
+		}
+		// Ensure ".." is at index 0 on every iteration.
+		if len(m.flatNodes) == 0 || !m.flatNodes[0].IsParentDir() {
+			t.Fatalf("step %d: flatNodes[0] is not the '..' parent-dir entry (RootPath=%q)", i, m.RootPath)
+		}
+		m.cursor = 0
+		m, _ = sendFileTreeKey(m, "enter")
+	}
+
+	if m.RootPath != "/" {
+		t.Errorf("after %d navigations, expected RootPath to be '/', got %q", maxSteps, m.RootPath)
+	}
+}
+
+// TestFileTreeModelNavigateUpMultipleSteps verifies that each successive ".."
+// navigation correctly changes RootPath one level at a time.
+func TestFileTreeModelNavigateUpMultipleSteps(t *testing.T) {
+	// Build a three-level deep temporary tree: <root>/a/b/c
+	base := t.TempDir()
+	deepDir := filepath.Join(base, "a", "b", "c")
+	if err := os.MkdirAll(deepDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	m := NewFileTreeModel(deepDir)
+	m.width = 80
+	m.height = 24
+
+	expectedPath := deepDir
+	for _, wantParent := range []string{
+		filepath.Join(base, "a", "b"),
+		filepath.Join(base, "a"),
+		base,
+	} {
+		m.cursor = 0
+		if len(m.flatNodes) == 0 || !m.flatNodes[0].IsParentDir() {
+			t.Fatalf("expected '..' at index 0 when RootPath=%q", m.RootPath)
+		}
+		m, _ = sendFileTreeKey(m, "enter")
+		if m.RootPath != wantParent {
+			t.Errorf("after navigating up from %q: RootPath = %q, want %q",
+				expectedPath, m.RootPath, wantParent)
+		}
+		expectedPath = wantParent
+	}
+}
+
+// TestFileTreeModelNavigateUpDoesNotStopBeforeRoot verifies that after reaching
+// "/" the model remains at "/" regardless of further ".." presses.
+func TestFileTreeModelNavigateUpDoesNotStopBeforeRoot(t *testing.T) {
+	m := NewFileTreeModel("/")
+	m.width = 80
+	m.height = 24
+
+	// Press ".." multiple times — must stay at "/".
+	for i := 0; i < 5; i++ {
+		m.cursor = 0
+		m, _ = sendFileTreeKey(m, "enter")
+		if m.RootPath != "/" {
+			t.Errorf("press %d: expected RootPath to remain '/', got %q", i+1, m.RootPath)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// AC 7 — Permission-denied directory shows empty listing (not blocking)
+// ---------------------------------------------------------------------------
+
+// TestFileTreeModel_PermissionDeniedRootShowsEmpty verifies that when
+// FileTreeModel's RootPath points to an unreadable (permission-denied)
+// directory the model still initialises correctly — showing only the ".."
+// entry rather than panicking or blocking.
+func TestFileTreeModel_PermissionDeniedRootShowsEmpty(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("permission checks are not enforced for the root user")
+	}
+
+	base := t.TempDir()
+	restricted := filepath.Join(base, "restricted")
+	if err := os.Mkdir(restricted, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Place a file inside so the directory would normally have a visible child.
+	if err := os.WriteFile(filepath.Join(restricted, "secret.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Remove all permissions so the directory cannot be listed.
+	if err := os.Chmod(restricted, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		// Restore so the temp-dir cleanup can remove the directory.
+		_ = os.Chmod(restricted, 0o755)
+	})
+
+	m := NewFileTreeModel(restricted)
+	m.width = 80
+	m.height = 24
+
+	// The model must not panic — it must present at least the ".." entry.
+	if len(m.flatNodes) == 0 {
+		t.Fatal("flatNodes must not be empty (at minimum '..' must be present)")
+	}
+	if !m.flatNodes[0].IsParentDir() {
+		t.Errorf("flatNodes[0] must be '..' for a permission-denied directory, got Kind=%v Name=%q",
+			m.flatNodes[0].Kind, m.flatNodes[0].Name)
+	}
+	// No real children should appear since the directory is unreadable.
+	if len(m.flatNodes) > 1 {
+		t.Errorf("permission-denied directory should show no children after '..'; got %v",
+			nodeNames(m.flatNodes[1:]))
+	}
+	// The view must render without panicking and must include "..".
+	view := m.View()
+	if !strings.Contains(view, "..") {
+		t.Errorf("view must contain '..' even for a permission-denied directory; got:\n%s", view)
+	}
+	// The model must not be done or stuck.
+	if m.Done() {
+		t.Error("model must not report Done() after initialising with a permission-denied directory")
+	}
+}
+
+// TestFileTreeModel_PermissionDeniedExpandedChildShowsEmpty verifies that
+// expanding a permission-denied sub-directory in the tree does not panic or
+// block — the child directory simply appears empty.
+func TestFileTreeModel_PermissionDeniedExpandedChildShowsEmpty(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("permission checks are not enforced for the root user")
+	}
+
+	base := t.TempDir()
+	restricted := filepath.Join(base, "restricted")
+	if err := os.Mkdir(restricted, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Place a file inside the restricted dir so it would normally show children.
+	if err := os.WriteFile(filepath.Join(restricted, "secret.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(restricted, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(restricted, 0o755)
+	})
+
+	m := NewFileTreeModel(base)
+	m.width = 80
+	m.height = 24
+
+	// Find the "restricted" directory node in the flat list.
+	dirIdx := -1
+	for i, n := range m.flatNodes {
+		if n.IsDir() && n.Name == "restricted" {
+			dirIdx = i
+			break
+		}
+	}
+	if dirIdx < 0 {
+		t.Skip("restricted directory not found in flat list")
+	}
+	countBefore := len(m.flatNodes)
+
+	// Expand the restricted directory — must not block or panic.
+	m.cursor = dirIdx
+	m, _ = sendFileTreeKey(m, "enter")
+
+	// After expanding, the count must not grow because the directory is unreadable.
+	if len(m.flatNodes) != countBefore {
+		t.Errorf("expanding a permission-denied directory must not add child nodes; before=%d after=%d",
+			countBefore, len(m.flatNodes))
+	}
+	// The model must still be usable.
+	if m.Done() {
+		t.Error("model must not report Done() after expanding a permission-denied directory")
+	}
+}
+
+// TestFileTreeModel_NavigateUpToPermissionDeniedParentShowsEmpty verifies that
+// pressing ".." to navigate into a permission-denied parent directory produces
+// an empty listing (just the ".." entry) rather than blocking.
+func TestFileTreeModel_NavigateUpToPermissionDeniedParentShowsEmpty(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("permission checks are not enforced for the root user")
+	}
+
+	// Create:
+	//   parent/  (initially readable; will be made execute-only = no listing)
+	//     child/  (readable, starting directory)
+	base := t.TempDir()
+	parent := filepath.Join(base, "parent")
+	child := filepath.Join(parent, "child")
+	if err := os.MkdirAll(child, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Place a file in parent so it would normally show as a child entry.
+	if err := os.WriteFile(filepath.Join(parent, "visible.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Execute-only (0o100): the directory can be traversed (enter) but not
+	// listed, so os.ReadDir will return EACCES while filepath.Abs still works.
+	if err := os.Chmod(parent, 0o100); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(parent, 0o755)
+	})
+
+	// Start the model inside the readable child directory.
+	m := NewFileTreeModel(child)
+	m.width = 80
+	m.height = 24
+
+	if len(m.flatNodes) == 0 || !m.flatNodes[0].IsParentDir() {
+		t.Skip("first node is not the '..' parent-dir entry")
+	}
+
+	// Navigate up — RootPath should become parent (which cannot be listed).
+	m.cursor = 0
+	m, _ = sendFileTreeKey(m, "enter")
+
+	// The model must not be Done or Back after this navigation.
+	if m.Done() {
+		t.Error("model must not report Done() after navigating into a permission-denied parent")
+	}
+	if m.Back() {
+		t.Error("model must not report Back() after navigating into a permission-denied parent")
+	}
+	if m.RootPath != parent {
+		t.Errorf("RootPath should be %q after navigation, got %q", parent, m.RootPath)
+	}
+	// parent is unlistable — only the ".." entry should be present.
+	if len(m.flatNodes) == 0 {
+		t.Fatal("flatNodes must not be empty (at minimum '..' must be present)")
+	}
+	if !m.flatNodes[0].IsParentDir() {
+		t.Errorf("flatNodes[0] must be '..' after navigating to permission-denied parent, got %+v",
+			m.flatNodes[0])
+	}
+	if len(m.flatNodes) > 1 {
+		t.Errorf("permission-denied parent should show no children after '..'; got %v",
+			nodeNames(m.flatNodes[1:]))
+	}
+	// The view must render without panicking and include "..".
+	view := m.View()
+	if !strings.Contains(view, "..") {
+		t.Errorf("view must contain '..' after navigating to a permission-denied parent; got:\n%s", view)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// AC 9 — Selections restored when navigating back down to original directory
+// ---------------------------------------------------------------------------
+
+// TestFileTreeModelSelectionsRestoredAfterNavigatingBackDown verifies that
+// selections made inside a sub-directory survive a round-trip: navigate up via
+// ".." (which changes RootPath to the parent) and then navigate back down by
+// expanding the original directory as a child entry in the parent view.
+//
+// This test ensures that the 'selected' map is never cleared on navigation, so
+// that checkmarks reappear as soon as the previously-visited directory is
+// expanded again.
+func TestFileTreeModelSelectionsRestoredAfterNavigatingBackDown(t *testing.T) {
+	// makeTestDir creates:
+	//   root/subdir/child.txt, root/subdir/.hidden.txt
+	//   root/alpha.txt, root/beta.txt, root/.hiddendir/secret.txt
+	root := makeTestDir(t)
+	subdir := filepath.Join(root, "subdir")
+
+	// ---- Step 1: start inside subdir, select child.txt ----
+	m := NewFileTreeModel(subdir)
+	m.width = 80
+	m.height = 24
+
+	// Locate the first visible file (child.txt, showHidden=false).
+	var childPath string
+	for i, n := range m.flatNodes {
+		if n.IsFile() {
+			m.cursor = i
+			childPath = n.FullPath
+			break
+		}
+	}
+	if childPath == "" {
+		t.Skip("no visible file found in subdir")
+	}
+	m, _ = sendFileTreeKey(m, " ") // select child.txt
+	if !m.selected[childPath] {
+		t.Fatal("file should be selected before navigation")
+	}
+
+	// ---- Step 2: navigate UP via the ".." entry ----
+	if !m.flatNodes[0].IsParentDir() {
+		t.Skip("first node is not the '..' parent-dir entry")
+	}
+	m.cursor = 0
+	m, _ = sendFileTreeKey(m, "enter")
+	if m.RootPath != root {
+		t.Fatalf("after navigating up, RootPath should be %q, got %q", root, m.RootPath)
+	}
+
+	// The selection must survive the root change.
+	if !m.selected[childPath] {
+		t.Fatal("selection should persist in selected map after navigating up")
+	}
+
+	// ---- Step 3: navigate back down by expanding subdir in the parent view ----
+	subdirIdx := -1
+	for i, n := range m.flatNodes {
+		if n.IsDir() && n.Name == "subdir" {
+			subdirIdx = i
+			break
+		}
+	}
+	if subdirIdx < 0 {
+		t.Fatal("subdir entry not found after navigating to parent")
+	}
+	m.cursor = subdirIdx
+	m, _ = sendFileTreeKey(m, "enter") // expand subdir
+
+	// ---- Step 4: verify selection is restored ----
+	// The selected map must still contain the original path.
+	if !m.selected[childPath] {
+		t.Errorf("selection for %q should be restored after navigating back down into its directory, but was lost", childPath)
+	}
+
+	// The rendered view should show a ✓ checkmark for the selected file.
+	view := m.View()
+	if !strings.Contains(view, "✓") {
+		t.Errorf("view should show ✓ checkmark for the re-entered directory's selected file; got:\n%s", view)
+	}
+}
+
+// TestFileTreeModelSelectionsRestoredAfterMultiLevelNavigation verifies that
+// selections survive a two-level up / two-level down round trip.
+//
+// Directory layout built by the test:
+//
+//	base/
+//	  a/
+//	    b/
+//	      file.txt
+func TestFileTreeModelSelectionsRestoredAfterMultiLevelNavigation(t *testing.T) {
+	base := t.TempDir()
+	deepDir := filepath.Join(base, "a", "b")
+	if err := os.MkdirAll(deepDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	filePath := filepath.Join(deepDir, "file.txt")
+	if err := os.WriteFile(filePath, []byte("content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Start model at deepDir (base/a/b).
+	m := NewFileTreeModel(deepDir)
+	m.width = 80
+	m.height = 24
+
+	// Select file.txt.
+	var fileIdx int
+	for i, n := range m.flatNodes {
+		if n.IsFile() && n.Name == "file.txt" {
+			fileIdx = i
+			break
+		}
+	}
+	m.cursor = fileIdx
+	m, _ = sendFileTreeKey(m, " ")
+	if !m.selected[filePath] {
+		t.Fatal("file.txt should be selected before navigation")
+	}
+
+	// Navigate up twice: b → a → base.
+	for _, wantRoot := range []string{
+		filepath.Join(base, "a"),
+		base,
+	} {
+		m.cursor = 0
+		m, _ = sendFileTreeKey(m, "enter")
+		if m.RootPath != wantRoot {
+			t.Fatalf("expected RootPath %q, got %q", wantRoot, m.RootPath)
+		}
+	}
+
+	// Selection must still be present in the map.
+	if !m.selected[filePath] {
+		t.Fatal("selection should survive two navigate-up steps")
+	}
+
+	// Navigate back down: expand 'a', then expand 'b'.
+	findDirByName := func(nodes []FlatFileNode, name string) int {
+		for i, n := range nodes {
+			if n.IsDir() && n.Name == name {
+				return i
+			}
+		}
+		return -1
+	}
+
+	aIdx := findDirByName(m.flatNodes, "a")
+	if aIdx < 0 {
+		t.Fatal("directory 'a' not found in root flat list")
+	}
+	m.cursor = aIdx
+	m, _ = sendFileTreeKey(m, "enter") // expand a
+
+	bIdx := findDirByName(m.flatNodes, "b")
+	if bIdx < 0 {
+		t.Fatal("directory 'b' not found after expanding 'a'")
+	}
+	m.cursor = bIdx
+	m, _ = sendFileTreeKey(m, "enter") // expand b
+
+	// The selection should still be intact.
+	if !m.selected[filePath] {
+		t.Errorf("selection for %q should be restored after navigating back down via 'a/b'; was lost", filePath)
+	}
+
+	// The rendered view should contain a ✓ checkmark.
+	view := m.View()
+	if !strings.Contains(view, "✓") {
+		t.Errorf("view should show ✓ for file.txt after navigate-down round trip; got:\n%s", view)
+	}
+}
+
+// TestFileTreeModelSelectedMapNotClearedOnNavigateUp is a targeted assertion
+// that the 'selected' map (which underpins selection restoration) is never
+// wiped when RootPath changes.
+func TestFileTreeModelSelectedMapNotClearedOnNavigateUp(t *testing.T) {
+	root := makeTestDir(t)
+	m := NewFileTreeModel(root)
+	m.width = 80
+	m.height = 24
+
+	// Select every visible file at the root level.
+	var selectedPaths []string
+	for i, n := range m.flatNodes {
+		if n.IsFile() {
+			m.cursor = i
+			m, _ = sendFileTreeKey(m, " ")
+			selectedPaths = append(selectedPaths, n.FullPath)
+		}
+	}
+	if len(selectedPaths) == 0 {
+		t.Skip("no files at root level")
+	}
+
+	// Navigate up.
+	m.cursor = 0
+	m, _ = sendFileTreeKey(m, "enter")
+
+	// All selections must still be in the map.
+	for _, p := range selectedPaths {
+		if !m.selected[p] {
+			t.Errorf("selection for %q was lost after navigating up; selected map should never be cleared", p)
+		}
 	}
 }
 

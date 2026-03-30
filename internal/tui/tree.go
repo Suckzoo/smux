@@ -14,6 +14,9 @@ const (
 	NodeKindCluster NodeKind = iota
 	// NodeKindHost represents a leaf host row nested under a cluster.
 	NodeKindHost
+	// NodeKindLocal represents the synthetic "Local (this machine)" entry
+	// in the source-origin picker; it is not associated with any cluster.
+	NodeKindLocal
 )
 
 // TreeNode is a single displayable row in the cluster tree.
@@ -33,6 +36,9 @@ func (n TreeNode) IsCluster() bool { return n.Kind == NodeKindCluster }
 
 // IsHost reports whether this node represents a leaf host entry.
 func (n TreeNode) IsHost() bool { return n.Kind == NodeKindHost }
+
+// IsLocal reports whether this node represents the "Local (this machine)" entry.
+func (n TreeNode) IsLocal() bool { return n.Kind == NodeKindLocal }
 
 // TreeState tracks the expanded/collapsed state for each cluster in the tree.
 // It is embedded in the bubbletea Model so that the TUI can efficiently

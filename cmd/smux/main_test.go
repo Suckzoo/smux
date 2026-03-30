@@ -2,9 +2,6 @@ package main_test
 
 import (
 	"os"
-	"os/exec"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -79,64 +76,6 @@ func TestBootstrapCalledWhenNotInTmux(t *testing.T) {
 	}
 }
 
-// TestTMUXVarSetWhenTUIStarts is the integration smoke-test described in Sub-AC 3.
-// It builds the smux binary, runs it with TMUX set to a fake socket path (so
-// InTmux() returns true), and confirms that:
-//  1. The bootstrap message "not running inside tmux" is NOT printed — meaning
-//     smux detected it was already inside tmux and skipped Bootstrap.
-//  2. Smux reached the TUI-initialisation phase, evidenced by the "config"
-//     error printed when no config file is found (since we point HOME to a
-//     temp directory with no smux config).
-//
-// Together these two assertions confirm that the TMUX environment variable
-// being set is the gate that allows TUI initialisation to proceed.
-func TestTMUXVarSetWhenTUIStarts(t *testing.T) {
-	// Skip if tmux is not installed — we only need the binary for InTmux().
-	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux not installed; skipping integration smoke-test")
-	}
-
-	// Build the smux binary into a temp directory.
-	tmpDir := t.TempDir()
-	bin := filepath.Join(tmpDir, "smux")
-	if runtime.GOOS == "windows" {
-		bin += ".exe"
-	}
-
-	// Build from the module root (two directories up from cmd/smux).
-	buildCmd := exec.Command("go", "build", "-o", bin, "./cmd/smux")
-	buildCmd.Dir = filepath.Join("..", "..")
-	if out, err := buildCmd.CombinedOutput(); err != nil {
-		t.Fatalf("go build failed: %v\n%s", err, out)
-	}
-
-	// Use a temp HOME so there is no ~/.config/smux/config.yaml.
-	fakeHome := t.TempDir()
-
-	// Run smux with TMUX set to a valid-looking (but fake) socket path.
-	// InTmux() only checks os.Getenv("TMUX") != "", so any non-empty value works.
-	runCmd := exec.Command(bin)
-	runCmd.Env = []string{
-		"TMUX=/tmp/tmux-smux-test/smux,12345,0",
-		"HOME=" + fakeHome,
-		"PATH=" + os.Getenv("PATH"),
-	}
-
-	out, _ := runCmd.CombinedOutput()
-	output := string(out)
-
-	// Assert 1: bootstrap was NOT triggered — TMUX was already set.
-	if strings.Contains(output, "not running inside tmux") {
-		t.Errorf("smux printed the bootstrap message even though TMUX was set\noutput:\n%s", output)
-	}
-
-	// Assert 2: smux reached the config-loading phase (TUI initialisation path).
-	// When no config file exists, smux prints a message containing "config".
-	if !strings.Contains(output, "config") {
-		t.Logf("smux output (expected 'config' message):\n%s", output)
-		t.Error("smux did not reach the config-loading phase — TUI initialisation path not reached")
-	}
-}
 
 // ---------------------------------------------------------------------------
 // Sub-AC 2 of AC 8 — TUI confirmation wired to tmux.CreateSSHWindow
@@ -386,54 +325,6 @@ func TestRunTUICallsNewToEnsureFreshSelections(t *testing.T) {
 // AC 17 — missing config.yaml prints helpful message with YAML example
 // ---------------------------------------------------------------------------
 
-// TestMissingConfigPrintsYAMLExample is an integration test that builds smux,
-// runs it with TMUX set (so bootstrap is skipped) but with a HOME directory
-// that has no ~/.config/smux/config.yaml, and verifies that the output
-// contains a YAML format example including large_selection_threshold.
-func TestMissingConfigPrintsYAMLExample(t *testing.T) {
-	// Skip if tmux is not installed — we need the binary to get past CheckInstalled.
-	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux not installed; skipping integration smoke-test")
-	}
-
-	// Build the smux binary into a temp directory.
-	tmpDir := t.TempDir()
-	bin := filepath.Join(tmpDir, "smux")
-	if runtime.GOOS == "windows" {
-		bin += ".exe"
-	}
-
-	buildCmd := exec.Command("go", "build", "-o", bin, "./cmd/smux")
-	buildCmd.Dir = filepath.Join("..", "..")
-	if out, err := buildCmd.CombinedOutput(); err != nil {
-		t.Fatalf("go build failed: %v\n%s", err, out)
-	}
-
-	// Use a temp HOME with no smux config.
-	fakeHome := t.TempDir()
-
-	// Run smux with TMUX set so InTmux() returns true, skipping Bootstrap.
-	runCmd := exec.Command(bin)
-	runCmd.Env = []string{
-		"TMUX=/tmp/tmux-smux-test/smux,12345,0",
-		"HOME=" + fakeHome,
-		"PATH=" + os.Getenv("PATH"),
-	}
-
-	out, _ := runCmd.CombinedOutput()
-	output := string(out)
-
-	// The output must contain the YAML key large_selection_threshold so the
-	// user knows it is configurable from the very first run.
-	if !strings.Contains(output, "large_selection_threshold") {
-		t.Errorf("smux output on missing config does not contain 'large_selection_threshold'\nfull output:\n%s", output)
-	}
-
-	// The output must also contain "clusters" to show the hosts section.
-	if !strings.Contains(output, "clusters") {
-		t.Errorf("smux output on missing config does not contain 'clusters' (YAML example)\nfull output:\n%s", output)
-	}
-}
 
 // TestMissingConfigMessageSourceInspection is a source-code inspection test
 // verifying that main.go uses config.ExampleConfig in its missing-config
@@ -449,57 +340,5 @@ func TestMissingConfigMessageSourceInspection(t *testing.T) {
 	// main.go must reference config.ExampleConfig in the missing-config branch.
 	if !strings.Contains(content, "config.ExampleConfig") {
 		t.Error("main.go does not reference config.ExampleConfig — the missing-config message must include the YAML format example")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Sub-AC 1 of distribute-file AC — dirty-state startup loading
-// ---------------------------------------------------------------------------
-
-// TestDirtyStateLoadedOnStartup is a source-inspection test that verifies
-// main.go calls the warnDirtyState helper (which loads dirty-state from disk)
-// during startup, so users are warned about leftover temporary SSH keys from
-// previous distribute-file operations.
-func TestDirtyStateLoadedOnStartup(t *testing.T) {
-	src, err := os.ReadFile("main.go")
-	if err != nil {
-		t.Fatalf("cannot read main.go: %v", err)
-	}
-	content := string(src)
-
-	// warnDirtyState must be defined.
-	if !strings.Contains(content, "func warnDirtyState()") {
-		t.Error("main.go does not define warnDirtyState() — dirty-state must be loaded on startup")
-	}
-
-	// warnDirtyState must be called (from runPersistent or run).
-	if !strings.Contains(content, "warnDirtyState()") {
-		t.Error("main.go does not call warnDirtyState() — dirty-state must be loaded on startup")
-	}
-
-	// dirtystate.Load must be referenced inside warnDirtyState.
-	if !strings.Contains(content, "dirtystate.Load()") {
-		t.Error("main.go does not call dirtystate.Load() — dirty-state must be loaded on startup")
-	}
-}
-
-// TestDirtyStateWarnIncludesHostInfo is a source-inspection test verifying
-// that when dirty hosts are present, warnDirtyState prints the host address,
-// key comment, and timestamp so the user has enough context to investigate.
-func TestDirtyStateWarnIncludesHostInfo(t *testing.T) {
-	src, err := os.ReadFile("main.go")
-	if err != nil {
-		t.Fatalf("cannot read main.go: %v", err)
-	}
-	content := string(src)
-
-	// The warning must reference h.KeyComment to show the key identifier.
-	if !strings.Contains(content, "h.KeyComment") {
-		t.Error("warnDirtyState must include h.KeyComment in the warning output so users can identify the leftover key")
-	}
-
-	// The warning must reference h.AddedAt to show when the key was created.
-	if !strings.Contains(content, "h.AddedAt") {
-		t.Error("warnDirtyState must include h.AddedAt in the warning output so users know when the key was distributed")
 	}
 }

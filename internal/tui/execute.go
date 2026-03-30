@@ -15,6 +15,9 @@ package tui
 import (
 	"context"
 	"fmt"
+	"os/exec"
+	"path"
+	"strconv"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -109,6 +112,32 @@ func (m *DistributeModel) startExecution() tea.Cmd {
 	dstHosts := append([]config.ResolvedHost(nil), m.destHosts...)
 	mode := m.copyMode
 	dstPath := m.effectiveDestPath()
+	// Snapshot the user-selected hub host (only meaningful in hub-spoke mode).
+	selectedHub := m.hubHost
+
+	// For hub-and-spoke retries, snapshot the original hub host so the retry
+	// goroutine can enforce hub-first ordering.  The hub is always AllHosts[0]
+	// in the original operation; FailedHosts may or may not include it.
+	var retryHubHost *config.ResolvedHost
+	if m.retryParams != nil && m.copyMode == "hub-spoke" && len(m.retryParams.AllHosts) > 0 {
+		hub := m.retryParams.AllHosts[0]
+		retryHubHost = &hub
+	}
+
+	// For non-retry hub-and-spoke mode, ensure the user-selected hub is first
+	// in dstHosts so that runHubSpokeWithProgress uses it as the hub
+	// (which always picks dstHosts[0]).
+	if mode == "hub-spoke" && retryHubHost == nil && selectedHub.Host != "" {
+		for i, h := range dstHosts {
+			if h.Host == selectedHub.Host {
+				if i != 0 {
+					dstHosts = append(dstHosts[:i], dstHosts[i+1:]...)
+					dstHosts = append([]config.ResolvedHost{selectedHub}, dstHosts...)
+				}
+				break
+			}
+		}
+	}
 
 	go func() {
 		defer close(ch)
@@ -162,10 +191,38 @@ func (m *DistributeModel) startExecution() tea.Cmd {
 			return
 		}
 
+		// Ensure the destination directory exists on every reachable host
+		// before starting transfers.  Hosts for which mkdir -p fails are
+		// removed from the reachable set and reported as TransferFailed so
+		// the user sees per-host granularity.
+		var mkdirReady []config.ResolvedHost
+		for _, h := range reachable {
+			if mkErr := mkdirOnHost(ctx, h, dstPath, kp); mkErr != nil {
+				ch <- executor.ProgressUpdate{
+					Host:   h,
+					Status: executor.TransferFailed,
+					Err:    fmt.Errorf("mkdir -p failed: %w", mkErr),
+				}
+			} else {
+				mkdirReady = append(mkdirReady, h)
+			}
+		}
+		if len(mkdirReady) == 0 {
+			return
+		}
+		reachable = mkdirReady
+
 		// Execute the transfer phase.
 		switch mode {
 		case "hub-spoke":
-			runHubSpokeWithProgress(ctx, srcHost, srcPath, reachable, dstPath, kp, ch)
+			if retryHubHost != nil {
+				// Retry path: enforce hub-first ordering using the original hub.
+				// The hub may or may not be in the failed-hosts set; the retry
+				// function handles both cases correctly.
+				runHubSpokeRetryWithProgress(ctx, srcHost, srcPath, reachable, dstPath, kp, ch, *retryHubHost)
+			} else {
+				runHubSpokeWithProgress(ctx, srcHost, srcPath, reachable, dstPath, kp, ch)
+			}
 		default: // "parallel" or empty
 			executor.RunParallelWithProgress(ctx, srcHost, srcPath, reachable, dstPath, kp, ch)
 		}
@@ -183,7 +240,7 @@ func (m *DistributeModel) startExecution() tea.Cmd {
 
 // runHubSpokeWithProgress orchestrates hub-and-spoke distribution with live
 // progress updates.  It sends TransferInProgress + TransferDone/TransferFailed
-// for the hub-push phase, then delegates to FanOutFromHubWithProgress for the
+// for the hub-push phase, then delegates to doHubFanOutWithProgress for the
 // fan-out phase.
 //
 // The hub is dstHosts[0].  All remaining hosts are spokes.
@@ -231,6 +288,25 @@ func runHubSpokeWithProgress(
 	}
 
 	// --- Phase 2: fan out hub → spokes ---
+	doHubFanOutWithProgress(ctx, hub, dstPath, spokes, ch)
+}
+
+// doHubFanOutWithProgress generates a hub keypair, distributes it to spokes,
+// and fans out the file from hub to all spokes with live progress updates.
+//
+// It handles Phase 2 of both initial and retry hub-and-spoke distribution.
+// A fresh HubKeyPair is generated on the hub; on success its public key is
+// distributed to each spoke before the fan-out.  Spokes for which key
+// distribution fails are reported as TransferFailed and excluded from the
+// fan-out.  The hub keypair is cleaned up (from spokes and from the hub)
+// when the function returns.
+func doHubFanOutWithProgress(
+	ctx context.Context,
+	hub config.ResolvedHost,
+	dstPath string,
+	spokes []config.ResolvedHost,
+	ch chan<- executor.ProgressUpdate,
+) {
 	// Generate a hub keypair for hub-to-spoke authentication.
 	hubKP, err := sshkeys.GenerateOnHub(ctx, hub)
 	if err != nil {
@@ -282,6 +358,142 @@ func runHubSpokeWithProgress(
 	}
 }
 
+// runHubSpokeRetryWithProgress is the retry-path counterpart of
+// runHubSpokeWithProgress.  It enforces hub-first ordering using the known
+// original hub host (retryHub), which may or may not appear in dstHosts.
+//
+//   - If retryHub IS in dstHosts (the hub failed previously): re-push source →
+//     hub first.  If this push fails, all remaining hosts in dstHosts are
+//     reported as TransferFailed and the function returns immediately — no
+//     spoke fan-out is attempted.  If the hub push succeeds, the fan-out
+//     phase proceeds to the remaining spoke hosts.
+//
+//   - If retryHub is NOT in dstHosts (the hub succeeded previously; only
+//     spokes failed): skip the push phase and go straight to the fan-out
+//     phase using retryHub as the hub.  The file is assumed to already exist
+//     on the hub from the prior operation.
+func runHubSpokeRetryWithProgress(
+	ctx context.Context,
+	srcHost config.ResolvedHost,
+	srcPath string,
+	dstHosts []config.ResolvedHost,
+	dstPath string,
+	kp *sshkeys.TempKeyPair,
+	ch chan<- executor.ProgressUpdate,
+	retryHub config.ResolvedHost,
+) {
+	if len(dstHosts) == 0 {
+		return
+	}
+
+	// Partition dstHosts: find hub (if present) and collect spokes.
+	hubIdx := -1
+	for i, h := range dstHosts {
+		if h.Host == retryHub.Host {
+			hubIdx = i
+			break
+		}
+	}
+
+	var spokes []config.ResolvedHost
+	for i, h := range dstHosts {
+		if i != hubIdx {
+			spokes = append(spokes, h)
+		}
+	}
+
+	// --- Phase 1 (conditional): re-push source → hub if hub is in retry set ---
+	if hubIdx >= 0 {
+		ch <- executor.ProgressUpdate{Host: retryHub, Status: executor.TransferInProgress}
+
+		hubResult := executor.PushToHub(ctx, srcHost, srcPath, retryHub, dstPath, kp)
+		if !hubResult.Success {
+			// Hub retry failed: report hub failure and do NOT attempt spoke
+			// fan-out.  All spoke hosts are reported as failed so the user
+			// sees the full picture in the TUI.
+			ch <- executor.ProgressUpdate{
+				Host:   retryHub,
+				Status: executor.TransferFailed,
+				Err:    hubResult.Err,
+				Stderr: hubResult.Stderr,
+			}
+			for _, spoke := range spokes {
+				ch <- executor.ProgressUpdate{
+					Host:   spoke,
+					Status: executor.TransferFailed,
+					Err:    fmt.Errorf("hub retry failed; spoke fan-out skipped"),
+				}
+			}
+			return
+		}
+		ch <- executor.ProgressUpdate{Host: retryHub, Status: executor.TransferDone}
+	}
+
+	if len(spokes) == 0 {
+		// Only the hub was retried and it succeeded; nothing more to do.
+		return
+	}
+
+	// --- Phase 2: fan out hub → spokes ---
+	doHubFanOutWithProgress(ctx, retryHub, dstPath, spokes, ch)
+}
+
+// ---------------------------------------------------------------------------
+// mkdir -p helper
+// ---------------------------------------------------------------------------
+
+// mkdirOnHost SSHes to host using kp's private key and runs "mkdir -p <dir>"
+// where dir is the parent directory of destPath.  This ensures the destination
+// directory exists before scp transfers data.
+//
+// The function uses the same SSH options (BatchMode, StrictHostKeyChecking,
+// ConnectTimeout) as the SCP transfers so that behaviour is consistent.
+// Errors are returned so the caller can mark the host as failed.
+func mkdirOnHost(ctx context.Context, host config.ResolvedHost, destPath string, kp *sshkeys.TempKeyPair) error {
+	// Derive the directory to create: use the parent directory of destPath so
+	// that a caller-supplied file path like /home/user/dir/file.txt creates
+	// /home/user/dir, and a directory path like /home/user/dir/ creates
+	// /home/user/dir (path.Dir strips the trailing slash).
+	dir := path.Dir(destPath)
+	if dir == "" || dir == "." {
+		// Relative or bare filename: nothing useful to mkdir.
+		return nil
+	}
+
+	args := []string{
+		"-o", "BatchMode=yes",
+		"-o", "StrictHostKeyChecking=no",
+		"-o", "ConnectTimeout=10",
+		"-i", kp.PrivateKeyPath,
+	}
+	if host.User != "" {
+		args = append(args, "-l", host.User)
+	}
+	if host.Port != 0 {
+		args = append(args, "-p", strconv.Itoa(host.Port))
+	}
+	if host.JumpHost != "" {
+		args = append(args, "-J", host.JumpHost)
+	}
+	args = append(args, host.EffectiveAddress(), "--", "mkdir -p "+shellEscapePath(dir))
+
+	var stderrBuf strings.Builder
+	cmd := exec.CommandContext(ctx, "ssh", args...)
+	cmd.Stderr = &stderrBuf
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("mkdir -p %q on %s: %w (stderr: %s)",
+			dir, host.Host, err, strings.TrimSpace(stderrBuf.String()))
+	}
+	return nil
+}
+
+// shellEscapePath wraps p in single quotes and escapes any embedded single
+// quotes so the result is safe to pass as a POSIX shell argument.
+func shellEscapePath(p string) string {
+	return "'" + strings.ReplaceAll(p, "'", `'\''`) + "'"
+}
+
 // ---------------------------------------------------------------------------
 // Helper accessors on DistributeModel
 // ---------------------------------------------------------------------------
@@ -304,16 +516,10 @@ func (m DistributeModel) resolvedSourceHost() config.ResolvedHost {
 }
 
 // effectiveDestPath returns the destination path to use for each host.
-// When m.destPath is empty and there are source paths, the first source path
-// is used so the file lands at the same location on the destination.
+// The user must always supply a non-empty destPath in DistributeStepDestPath;
+// there is no implicit fallback to the source path or any default directory.
 func (m DistributeModel) effectiveDestPath() string {
-	if m.destPath != "" {
-		return m.destPath
-	}
-	if len(m.sourcePaths) > 0 {
-		return m.sourcePaths[0]
-	}
-	return "/tmp/smux-distribute"
+	return m.destPath
 }
 
 // ---------------------------------------------------------------------------
@@ -325,15 +531,21 @@ func (m DistributeModel) effectiveDestPath() string {
 //   - Before execution starts: shows a ready prompt with Enter to begin.
 //   - During execution: shows per-host status rows with live icons.
 //   - After execution: shows a summary (all done / some failed).
+//   - When errorOverlay is set: shows the full-error overlay instead.
 func (m DistributeModel) renderExecuteStepWithProgress() string {
 	headStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15"))
 	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+
+	// Show error overlay when active (takes over the whole step content area).
+	if m.errorOverlay != nil {
+		return m.renderErrorOverlay(*m.errorOverlay)
+	}
 
 	var sb strings.Builder
 
 	if !m.executeStarted {
 		// Pre-execution: prompt to begin.
-		sb.WriteString(headStyle.Render("Step 6 of 6: Execute Distribution"))
+		sb.WriteString(headStyle.Render(fmt.Sprintf("Step %d of %d: Execute Distribution", m.stepIndex()+1, m.totalSteps())))
 		sb.WriteString("\n\n")
 		sb.WriteString(m.renderOperationSummary())
 		sb.WriteString("\n\n")
@@ -342,16 +554,19 @@ func (m DistributeModel) renderExecuteStepWithProgress() string {
 	}
 
 	// Execution in progress or complete.
-	sb.WriteString(headStyle.Render("Step 6 of 6: Distributing Files"))
+	sb.WriteString(headStyle.Render(fmt.Sprintf("Step %d of %d: Distributing Files", m.stepIndex()+1, m.totalSteps())))
 	sb.WriteString("\n\n")
 	sb.WriteString(m.renderHostProgressRows())
 
 	if m.executeDone {
 		sb.WriteString("\n")
-		summary := m.renderCompletionSummary()
-		sb.WriteString(summary)
+		sb.WriteString(m.renderCompletionSummary())
 		sb.WriteString("\n\n")
-		sb.WriteString(hintStyle.Render("esc to exit  q quit"))
+		if len(m.failedHosts()) > 0 {
+			sb.WriteString(hintStyle.Render("j/k select  enter view error  r retry failed  esc back  q quit"))
+		} else {
+			sb.WriteString(hintStyle.Render("esc back  q quit"))
+		}
 	}
 
 	return sb.String()
@@ -382,15 +597,23 @@ func (m DistributeModel) renderOperationSummary() string {
 }
 
 // renderHostProgressRows renders one row per destination host showing the
-// current transfer status icon and host name.
+// current transfer status icon, host name, and (for failed hosts) a truncated
+// error reason. The row at progressCursor is highlighted with a cursor marker.
 func (m DistributeModel) renderHostProgressRows() string {
-	pendingStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	pendingStyle    := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	inProgressStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("12"))
-	doneStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
-	failedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
+	doneStyle       := lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
+	failedStyle     := lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
+	cursorStyle     := lipgloss.NewStyle().Background(lipgloss.Color("4")).Foreground(lipgloss.Color("15")).Bold(true)
+
+	// Reserve space for "  X name-padded-to-30  " prefix; rest for truncated error.
+	maxLineWidth := m.width - 6
+	if maxLineWidth < 40 {
+		maxLineWidth = 40
+	}
 
 	var sb strings.Builder
-	for _, host := range m.destHosts {
+	for i, host := range m.destHosts {
 		status := executor.TransferPending
 		if m.hostProgress != nil {
 			if s, ok := m.hostProgress[host.Host]; ok {
@@ -398,8 +621,9 @@ func (m DistributeModel) renderHostProgressRows() string {
 			}
 		}
 
-		var icon, detail string
+		var icon string
 		var style lipgloss.Style
+		var detail string
 		switch status {
 		case executor.TransferPending:
 			icon = "○"
@@ -416,13 +640,79 @@ func (m DistributeModel) renderHostProgressRows() string {
 		case executor.TransferFailed:
 			icon = "✗"
 			detail = "failed"
+			if m.hostErrors != nil {
+				if reason, ok := m.hostErrors[host.Host]; ok && reason != "" {
+					prefix := "failed: "
+					// available chars after "  X name-padded-30  prefix"
+					available := maxLineWidth - 2 - 1 - 30 - 2 - len(prefix)
+					if available < 10 {
+						available = 10
+					}
+					truncated := reason
+					if len(truncated) > available {
+						truncated = truncated[:available-1] + "…"
+					}
+					detail = prefix + truncated
+				}
+			}
 			style = failedStyle
 		}
 
-		line := style.Render(fmt.Sprintf("  %s %-30s  %s", icon, host.DisplayName, detail))
+		isCursor := i == m.progressCursor
+		line := fmt.Sprintf("  %s %-30s  %s", icon, host.DisplayName, detail)
+		if isCursor {
+			// Replace the leading space with the cursor arrow.
+			line = cursorStyle.Render("▶" + line[1:])
+		} else {
+			line = style.Render(line)
+		}
 		sb.WriteString(line + "\n")
 	}
 	return sb.String()
+}
+
+// renderErrorOverlay renders a full-screen overlay box showing the complete
+// error text for a failed host. Dismissed with Esc.
+//
+// The full error text is embedded verbatim so that callers inspecting the raw
+// output can use strings.Contains to verify the error is present.
+func (m DistributeModel) renderErrorOverlay(fullError string) string {
+	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("9"))
+	hintStyle  := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	borderStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
+
+	// Build the overlay as a sequence of lines joined by newlines so that the
+	// full error text (which may itself contain newlines) is never padded or
+	// word-wrapped by lipgloss — preserving the literal string for tests.
+	var sb strings.Builder
+	sb.WriteString(borderStyle.Render("╭── Transfer Error ──────────────────────────────────────────╮"))
+	sb.WriteString("\n")
+	sb.WriteString(borderStyle.Render("│"))
+	sb.WriteString("\n")
+	sb.WriteString("  " + titleStyle.Render("Transfer Error"))
+	sb.WriteString("\n\n")
+	sb.WriteString("  " + fullError)
+	sb.WriteString("\n\n")
+	sb.WriteString("  " + hintStyle.Render("esc to close"))
+	sb.WriteString("\n")
+	sb.WriteString(borderStyle.Render("╰────────────────────────────────────────────────────────────╯"))
+	return sb.String()
+}
+
+// failedHosts returns the subset of m.destHosts whose transfer status is
+// TransferFailed.  It is used to determine whether a retry is possible and to
+// build the RetryParams passed to NewRetryDistributeModel.
+//
+// Returns nil (not an empty slice) when there are no failures, so callers can
+// use len(m.failedHosts()) > 0 as the guard for retry availability.
+func (m DistributeModel) failedHosts() []config.ResolvedHost {
+	var failed []config.ResolvedHost
+	for _, h := range m.destHosts {
+		if m.hostProgress != nil && m.hostProgress[h.Host] == executor.TransferFailed {
+			failed = append(failed, h)
+		}
+	}
+	return failed
 }
 
 // renderCompletionSummary renders a brief done/failed count after all

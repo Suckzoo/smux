@@ -184,9 +184,9 @@ func buildHubSCPCommand(
 	// Source: the file path on the hub.
 	parts = append(parts, hubShellEscape(hubPath))
 	// Destination: [user@]spoke:destPath
-	destAddr := spoke.Host
+	destAddr := spoke.EffectiveAddress()
 	if spoke.User != "" {
-		destAddr = spoke.User + "@" + spoke.Host
+		destAddr = spoke.User + "@" + spoke.EffectiveAddress()
 	}
 	parts = append(parts, hubShellEscape(destAddr+":"+destPath))
 

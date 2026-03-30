@@ -876,3 +876,52 @@ func TestFanOutFromHub_RemoteKeyPassedToSCP(t *testing.T) {
 		t.Errorf("expected remote key path %q in SSH args; got:\n%s", remoteKeyPath, string(argsData))
 	}
 }
+
+// ---------------------------------------------------------------------------
+// destPath uniformity tests — AC 5
+// ---------------------------------------------------------------------------
+
+// TestBuildHubSCPCommand_SpokeUsesInternalIP verifies that buildHubSCPCommand
+// uses spoke.InternalIP as the destination address when InternalIP is set.
+func TestBuildHubSCPCommand_SpokeUsesInternalIP(t *testing.T) {
+	hubKP := &sshkeys.HubKeyPair{RemotePrivateKeyPath: "/hub/.smux/id_rsa"}
+	spoke := config.ResolvedHost{
+		Host:       "spoke-01.example.com",
+		InternalIP: "10.0.0.1",
+		User:       "ubuntu",
+	}
+	cmd := buildHubSCPCommand("/hub/file.txt", spoke, "/dst/file.txt", hubKP)
+	if !strings.Contains(cmd, "ubuntu@10.0.0.1:") {
+		t.Errorf("expected internal IP in hub scp command, got: %s", cmd)
+	}
+	if strings.Contains(cmd, "spoke-01.example.com") {
+		t.Errorf("public hostname should not appear when InternalIP is set, got: %s", cmd)
+	}
+}
+
+// TestBuildHubSCPCommand_DestPathUsedForAllSpokes verifies that
+// buildHubSCPCommand encodes the same destPath in the destination argument for
+// every spoke host.  This is the unit-level proof that a single destPath is
+// applied uniformly across all spokes when the hub SCP command is constructed.
+func TestBuildHubSCPCommand_DestPathUsedForAllSpokes(t *testing.T) {
+	hubKP := fakeHubKeyPair("/hub-dir", "/hub-dir/id_ed25519")
+	destPath := "/opt/deploy/payload.tar.gz"
+	hubPath := "/hub/payload.tar.gz"
+
+	spokes := []config.ResolvedHost{
+		{Host: "spoke1.example.com"},
+		{Host: "spoke2.example.com"},
+		{Host: "spoke3.example.com"},
+	}
+
+	for _, spoke := range spokes {
+		cmd := buildHubSCPCommand(hubPath, spoke, destPath, hubKP)
+		// buildHubSCPCommand shell-escapes the destination; the plain
+		// host:path substring must still appear inside the escaped form.
+		expectedFragment := spoke.Host + ":" + destPath
+		if !strings.Contains(cmd, expectedFragment) {
+			t.Errorf("spoke %q: expected %q in hub SCP command;\ngot:\n%s",
+				spoke.Host, expectedFragment, cmd)
+		}
+	}
+}

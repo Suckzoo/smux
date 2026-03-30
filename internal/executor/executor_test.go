@@ -522,3 +522,136 @@ exit 0
 		t.Errorf("remote source: expected source address in args; recorded args:\n%s", argsText)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// InternalIP tests — Task 2
+// ---------------------------------------------------------------------------
+
+// TestBuildSCPArgs_SrcUsesInternalIP verifies that buildSCPArgs uses
+// src.InternalIP as the source address when InternalIP is set (remote source).
+func TestBuildSCPArgs_SrcUsesInternalIP(t *testing.T) {
+	kp := &sshkeys.TempKeyPair{PrivateKeyPath: "/tmp/key"}
+	src := config.ResolvedHost{
+		Host:       "src-01.example.com",
+		InternalIP: "10.0.0.2",
+		User:       "ubuntu",
+	}
+	dst := config.ResolvedHost{Host: "dst-01.example.com"}
+	args := buildSCPArgs(src, "/src/file.txt", dst, "/dst/file.txt", kp)
+	argsStr := strings.Join(args, " ")
+	if !strings.Contains(argsStr, "ubuntu@10.0.0.2:/src/file.txt") {
+		t.Errorf("expected internal IP in src args, got: %s", argsStr)
+	}
+	if strings.Contains(argsStr, "src-01.example.com") {
+		t.Errorf("public hostname should not appear when src InternalIP is set, got: %s", argsStr)
+	}
+}
+
+// TestBuildSCPArgs_DestUsesInternalIP verifies that buildSCPArgs uses
+// dst.InternalIP as the destination address when InternalIP is set.
+func TestBuildSCPArgs_DestUsesInternalIP(t *testing.T) {
+	kp := &sshkeys.TempKeyPair{PrivateKeyPath: "/tmp/key"}
+	dst := config.ResolvedHost{
+		Host:       "spoke-01.example.com",
+		InternalIP: "10.0.0.1",
+		User:       "ubuntu",
+	}
+	args := buildSCPArgs(config.ResolvedHost{}, "/src/file.txt", dst, "/dst/file.txt", kp)
+	argsStr := strings.Join(args, " ")
+	if !strings.Contains(argsStr, "ubuntu@10.0.0.1:/dst/file.txt") {
+		t.Errorf("expected internal IP in args, got: %s", argsStr)
+	}
+	if strings.Contains(argsStr, "spoke-01.example.com") {
+		t.Errorf("public hostname should not appear when InternalIP is set, got: %s", argsStr)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// destPath uniformity tests — AC 5
+// ---------------------------------------------------------------------------
+
+// TestBuildSCPArgs_DestPathUsedForAllHosts verifies that buildSCPArgs encodes
+// the same destPath in the destination argument for every destination host.
+// This is the unit-level proof that a single destPath is applied uniformly
+// across all target hosts when SCP arguments are constructed.
+func TestBuildSCPArgs_DestPathUsedForAllHosts(t *testing.T) {
+	kp := fakeTempKeyPair("/tmp/fakedir/id_ed25519")
+	src := config.ResolvedHost{} // local source
+	srcPath := "/source/data.tar.gz"
+	destPath := "/opt/deploy/data.tar.gz"
+
+	dests := []config.ResolvedHost{
+		{Host: "host1.example.com"},
+		{Host: "host2.example.com"},
+		{Host: "host3.example.com"},
+	}
+
+	for _, dst := range dests {
+		args := buildSCPArgs(src, srcPath, dst, destPath, kp)
+		expectedDst := dst.Host + ":" + destPath
+		if !contains(args, expectedDst) {
+			t.Errorf("host %q: expected destination %q in SCP args; got: %s",
+				dst.Host, expectedDst, strings.Join(args, " "))
+		}
+	}
+}
+
+// TestRunParallel_DestPathPassedToAllHosts verifies that RunParallel passes the
+// same destPath to every destination host's SCP call.  A fake scp writes its
+// args to a per-process file (using $$) so concurrent invocations do not race.
+// After all transfers complete we inspect every args file and confirm each one
+// contains the configured destPath.
+func TestRunParallel_DestPathPassedToAllHosts(t *testing.T) {
+	argsDir := t.TempDir()
+	fakeDir := t.TempDir()
+	fakeSCP := filepath.Join(fakeDir, "scp")
+	// Each scp process writes its args to a unique file identified by its PID.
+	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$@\" > %s/args_$$.txt\nexit 0\n", argsDir)
+	if err := os.WriteFile(fakeSCP, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake scp: %v", err)
+	}
+	origPath := os.Getenv("PATH")
+	t.Setenv("PATH", fakeDir+string(os.PathListSeparator)+origPath)
+
+	kp := fakeTempKeyPair("/nonexistent/key")
+	ctx := context.Background()
+	src := config.ResolvedHost{}
+	destPath := "/opt/deploy/payload.tar.gz"
+	dests := []config.ResolvedHost{
+		{Host: "host1.example.com"},
+		{Host: "host2.example.com"},
+		{Host: "host3.example.com"},
+	}
+
+	results := RunParallel(ctx, src, "/src/payload.tar.gz", dests, destPath, kp)
+
+	if len(results) != 3 {
+		t.Fatalf("expected 3 results, got %d", len(results))
+	}
+	for i, r := range results {
+		if !r.Success {
+			t.Errorf("result[%d] (%s): expected success, got err: %v", i, r.Host.Host, r.Err)
+		}
+	}
+
+	// Each scp invocation writes to its own PID-named file; verify all three
+	// files exist and each contains destPath.
+	entries, err := os.ReadDir(argsDir)
+	if err != nil {
+		t.Fatalf("ReadDir argsDir: %v", err)
+	}
+	if len(entries) != 3 {
+		t.Fatalf("expected 3 args files (one per host), got %d", len(entries))
+	}
+	for _, e := range entries {
+		argsFile := filepath.Join(argsDir, e.Name())
+		data, err := os.ReadFile(argsFile)
+		if err != nil {
+			t.Fatalf("read args file %s: %v", argsFile, err)
+		}
+		if !strings.Contains(string(data), destPath) {
+			t.Errorf("args file %s: expected destPath %q in scp args;\ngot:\n%s",
+				e.Name(), destPath, string(data))
+		}
+	}
+}
