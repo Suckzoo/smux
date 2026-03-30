@@ -114,9 +114,9 @@ func buildSFTPArgs(host config.ResolvedHost) []string {
 	}
 
 	// Destination: [user@]host
-	dest := host.Host
+	dest := host.EffectiveAddress()
 	if host.User != "" {
-		dest = host.User + "@" + host.Host
+		dest = host.User + "@" + host.EffectiveAddress()
 	}
 	args = append(args, dest)
 	return args
@@ -172,7 +172,7 @@ func buildSSHArgs(host config.ResolvedHost) []string {
 	if host.JumpHost != "" {
 		args = append(args, "-J", host.JumpHost)
 	}
-	args = append(args, host.Host)
+	args = append(args, host.EffectiveAddress())
 	return args
 }
 

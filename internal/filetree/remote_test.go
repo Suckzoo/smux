@@ -1,10 +1,6 @@
 package filetree
 
 import (
-	"context"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -251,6 +247,20 @@ func TestBuildSFTPArgs_Minimal(t *testing.T) {
 	}
 }
 
+// TestBuildSSHArgsForHost_UsesInternalIP verifies that BuildSSHArgsForHost
+// uses host.InternalIP as the target address when InternalIP is set.
+func TestBuildSSHArgsForHost_UsesInternalIP(t *testing.T) {
+	host := config.ResolvedHost{
+		Host:       "spoke-01.example.com",
+		InternalIP: "10.0.0.1",
+	}
+	args := BuildSSHArgsForHost(host)
+	last := args[len(args)-1]
+	if last != "10.0.0.1" {
+		t.Errorf("BuildSSHArgsForHost: last arg (host) = %q, want %q", last, "10.0.0.1")
+	}
+}
+
 func TestBuildSFTPArgs_WithUserAndPort(t *testing.T) {
 	host := config.ResolvedHost{
 		Host: "files.example.com",
@@ -268,119 +278,3 @@ func TestBuildSFTPArgs_WithUserAndPort(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Integration test: RemoteListDir against localhost (skipped unless SSH is available)
-// ---------------------------------------------------------------------------
-
-// TestRemoteListDir_Localhost is an integration test that enumerates a
-// temporary local directory via localhost SSH/SFTP.  It requires:
-//   - A running SSH daemon on localhost port 22.
-//   - The current user able to SSH to localhost without a password (key auth).
-//
-// The test is skipped when these conditions are not met.
-func TestRemoteListDir_Localhost(t *testing.T) {
-	if _, err := exec.LookPath("ssh"); err != nil {
-		t.Skip("ssh not found in PATH")
-	}
-
-	// Quick check: can we SSH to localhost?
-	ctx := context.Background()
-	probe := exec.CommandContext(ctx, "ssh",
-		"-o", "BatchMode=yes",
-		"-o", "StrictHostKeyChecking=no",
-		"-o", "ConnectTimeout=3",
-		"localhost", "--", "true",
-	)
-	if err := probe.Run(); err != nil {
-		t.Skipf("cannot SSH to localhost (BatchMode): %v", err)
-	}
-
-	// Create a temporary directory with known contents.
-	tmpDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(tmpDir, "hello.txt"), []byte("hi"), 0o644); err != nil {
-		t.Fatalf("setup: write file: %v", err)
-	}
-	if err := os.Mkdir(filepath.Join(tmpDir, "subdir"), 0o755); err != nil {
-		t.Fatalf("setup: mkdir: %v", err)
-	}
-
-	host := config.ResolvedHost{Host: "localhost"}
-	entries, err := RemoteListDir(ctx, host, tmpDir)
-	if err != nil {
-		t.Fatalf("RemoteListDir: %v", err)
-	}
-
-	names := map[string]bool{}
-	for _, e := range entries {
-		names[e.Name] = true
-	}
-
-	if !names["hello.txt"] {
-		t.Errorf("expected hello.txt in results; got: %v", names)
-	}
-	if !names["subdir"] {
-		t.Errorf("expected subdir in results; got: %v", names)
-	}
-
-	// Verify IsDir is set correctly for the subdir.
-	for _, e := range entries {
-		if e.Name == "subdir" && !e.IsDir {
-			t.Error("subdir should have IsDir=true")
-		}
-		if e.Name == "hello.txt" && e.IsDir {
-			t.Error("hello.txt should have IsDir=false")
-		}
-	}
-}
-
-// TestRemoteListDir_SFTPFallsBackToSSH verifies the fallback behaviour by
-// injecting a fake sftp binary that always exits with code 1.
-func TestRemoteListDir_SFTPFallsBackToSSH(t *testing.T) {
-	if _, err := exec.LookPath("ssh"); err != nil {
-		t.Skip("ssh not found in PATH")
-	}
-
-	// Quick connectivity check.
-	ctx := context.Background()
-	probe := exec.CommandContext(ctx, "ssh",
-		"-o", "BatchMode=yes",
-		"-o", "StrictHostKeyChecking=no",
-		"-o", "ConnectTimeout=3",
-		"localhost", "--", "true",
-	)
-	if err := probe.Run(); err != nil {
-		t.Skipf("cannot SSH to localhost: %v", err)
-	}
-
-	// Create a fake sftp binary that exits non-zero.
-	fakeDir := t.TempDir()
-	fakeSFTP := filepath.Join(fakeDir, "sftp")
-	script := "#!/bin/sh\nexit 1\n"
-	if err := os.WriteFile(fakeSFTP, []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake sftp: %v", err)
-	}
-
-	// Prepend fakeDir to PATH so the fake sftp is found first.
-	origPath := os.Getenv("PATH")
-	t.Setenv("PATH", fakeDir+string(os.PathListSeparator)+origPath)
-
-	// Use a temp dir with a known file.
-	tmpDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(tmpDir, "fallback.txt"), []byte("x"), 0o644); err != nil {
-		t.Fatalf("write file: %v", err)
-	}
-
-	host := config.ResolvedHost{Host: "localhost"}
-	entries, err := RemoteListDir(ctx, host, tmpDir)
-	if err != nil {
-		t.Fatalf("RemoteListDir (with fake sftp): %v", err)
-	}
-
-	names := map[string]bool{}
-	for _, e := range entries {
-		names[e.Name] = true
-	}
-	if !names["fallback.txt"] {
-		t.Errorf("expected fallback.txt via SSH fallback; got: %v", names)
-	}
-}

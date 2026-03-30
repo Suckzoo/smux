@@ -174,9 +174,9 @@ func buildSCPArgs(
 	}
 
 	// Destination argument: [user@]host:path
-	dstAddr := dst.Host
+	dstAddr := dst.EffectiveAddress()
 	if dst.User != "" {
-		dstAddr = dst.User + "@" + dst.Host
+		dstAddr = dst.User + "@" + dst.EffectiveAddress()
 	}
 	args = append(args, dstAddr+":"+dstPath)
 
