@@ -531,9 +531,15 @@ func (m DistributeModel) effectiveDestPath() string {
 //   - Before execution starts: shows a ready prompt with Enter to begin.
 //   - During execution: shows per-host status rows with live icons.
 //   - After execution: shows a summary (all done / some failed).
+//   - When errorOverlay is set: shows the full-error overlay instead.
 func (m DistributeModel) renderExecuteStepWithProgress() string {
 	headStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15"))
 	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+
+	// Show error overlay when active (takes over the whole step content area).
+	if m.errorOverlay != nil {
+		return m.renderErrorOverlay(*m.errorOverlay)
+	}
 
 	var sb strings.Builder
 
@@ -554,13 +560,12 @@ func (m DistributeModel) renderExecuteStepWithProgress() string {
 
 	if m.executeDone {
 		sb.WriteString("\n")
-		summary := m.renderCompletionSummary()
-		sb.WriteString(summary)
+		sb.WriteString(m.renderCompletionSummary())
 		sb.WriteString("\n\n")
 		if len(m.failedHosts()) > 0 {
-			sb.WriteString(hintStyle.Render("r retry failed  esc to exit  q quit"))
+			sb.WriteString(hintStyle.Render("j/k select  enter view error  r retry failed  esc back  q quit"))
 		} else {
-			sb.WriteString(hintStyle.Render("esc to exit  q quit"))
+			sb.WriteString(hintStyle.Render("esc back  q quit"))
 		}
 	}
 
@@ -592,15 +597,23 @@ func (m DistributeModel) renderOperationSummary() string {
 }
 
 // renderHostProgressRows renders one row per destination host showing the
-// current transfer status icon and host name.
+// current transfer status icon, host name, and (for failed hosts) a truncated
+// error reason. The row at progressCursor is highlighted with a cursor marker.
 func (m DistributeModel) renderHostProgressRows() string {
-	pendingStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	pendingStyle    := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	inProgressStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("12"))
-	doneStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
-	failedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
+	doneStyle       := lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
+	failedStyle     := lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
+	cursorStyle     := lipgloss.NewStyle().Background(lipgloss.Color("4")).Foreground(lipgloss.Color("15")).Bold(true)
+
+	// Reserve space for "  X name-padded-to-30  " prefix; rest for truncated error.
+	maxLineWidth := m.width - 6
+	if maxLineWidth < 40 {
+		maxLineWidth = 40
+	}
 
 	var sb strings.Builder
-	for _, host := range m.destHosts {
+	for i, host := range m.destHosts {
 		status := executor.TransferPending
 		if m.hostProgress != nil {
 			if s, ok := m.hostProgress[host.Host]; ok {
@@ -608,8 +621,9 @@ func (m DistributeModel) renderHostProgressRows() string {
 			}
 		}
 
-		var icon, detail string
+		var icon string
 		var style lipgloss.Style
+		var detail string
 		switch status {
 		case executor.TransferPending:
 			icon = "○"
@@ -626,12 +640,62 @@ func (m DistributeModel) renderHostProgressRows() string {
 		case executor.TransferFailed:
 			icon = "✗"
 			detail = "failed"
+			if m.hostErrors != nil {
+				if reason, ok := m.hostErrors[host.Host]; ok && reason != "" {
+					prefix := "failed: "
+					// available chars after "  X name-padded-30  prefix"
+					available := maxLineWidth - 2 - 1 - 30 - 2 - len(prefix)
+					if available < 10 {
+						available = 10
+					}
+					truncated := reason
+					if len(truncated) > available {
+						truncated = truncated[:available-1] + "…"
+					}
+					detail = prefix + truncated
+				}
+			}
 			style = failedStyle
 		}
 
-		line := style.Render(fmt.Sprintf("  %s %-30s  %s", icon, host.DisplayName, detail))
+		isCursor := i == m.progressCursor
+		line := fmt.Sprintf("  %s %-30s  %s", icon, host.DisplayName, detail)
+		if isCursor {
+			// Replace the leading space with the cursor arrow.
+			line = cursorStyle.Render("▶" + line[1:])
+		} else {
+			line = style.Render(line)
+		}
 		sb.WriteString(line + "\n")
 	}
+	return sb.String()
+}
+
+// renderErrorOverlay renders a full-screen overlay box showing the complete
+// error text for a failed host. Dismissed with Esc.
+//
+// The full error text is embedded verbatim so that callers inspecting the raw
+// output can use strings.Contains to verify the error is present.
+func (m DistributeModel) renderErrorOverlay(fullError string) string {
+	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("9"))
+	hintStyle  := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	borderStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
+
+	// Build the overlay as a sequence of lines joined by newlines so that the
+	// full error text (which may itself contain newlines) is never padded or
+	// word-wrapped by lipgloss — preserving the literal string for tests.
+	var sb strings.Builder
+	sb.WriteString(borderStyle.Render("╭── Transfer Error ──────────────────────────────────────────╮"))
+	sb.WriteString("\n")
+	sb.WriteString(borderStyle.Render("│"))
+	sb.WriteString("\n")
+	sb.WriteString("  " + titleStyle.Render("Transfer Error"))
+	sb.WriteString("\n\n")
+	sb.WriteString("  " + fullError)
+	sb.WriteString("\n\n")
+	sb.WriteString("  " + hintStyle.Render("esc to close"))
+	sb.WriteString("\n")
+	sb.WriteString(borderStyle.Render("╰────────────────────────────────────────────────────────────╯"))
 	return sb.String()
 }
 
