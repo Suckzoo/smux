@@ -1268,13 +1268,6 @@ func (m DistributeModel) handleConfirmKey(msg tea.KeyMsg) (DistributeModel, tea.
 
 // handleExecuteKey handles key input during DistributeStepExecute.
 //
-// Enter starts the transfer (first press) or is a no-op once execution has
-// begun.  'r' retries only the failed hosts after execution completes by
-// constructing a RetryParams from the current model state and returning a new
-// DistributeModel positioned at DistributeStepRetryConfirm.  Esc and
-// q/Ctrl+C are already consumed by the global handler.
-// handleExecuteKey handles key input during DistributeStepExecute.
-//
 // Enter starts the transfer (first press) or opens the error overlay for the
 // selected failed host (when execution is done).  j/k move the cursor through
 // the destination host list.  'r' retries failed hosts after execution
