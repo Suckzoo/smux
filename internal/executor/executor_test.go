@@ -527,6 +527,26 @@ exit 0
 // InternalIP tests — Task 2
 // ---------------------------------------------------------------------------
 
+// TestBuildSCPArgs_SrcUsesInternalIP verifies that buildSCPArgs uses
+// src.InternalIP as the source address when InternalIP is set (remote source).
+func TestBuildSCPArgs_SrcUsesInternalIP(t *testing.T) {
+	kp := &sshkeys.TempKeyPair{PrivateKeyPath: "/tmp/key"}
+	src := config.ResolvedHost{
+		Host:       "src-01.example.com",
+		InternalIP: "10.0.0.2",
+		User:       "ubuntu",
+	}
+	dst := config.ResolvedHost{Host: "dst-01.example.com"}
+	args := buildSCPArgs(src, "/src/file.txt", dst, "/dst/file.txt", kp)
+	argsStr := strings.Join(args, " ")
+	if !strings.Contains(argsStr, "ubuntu@10.0.0.2:/src/file.txt") {
+		t.Errorf("expected internal IP in src args, got: %s", argsStr)
+	}
+	if strings.Contains(argsStr, "src-01.example.com") {
+		t.Errorf("public hostname should not appear when src InternalIP is set, got: %s", argsStr)
+	}
+}
+
 // TestBuildSCPArgs_DestUsesInternalIP verifies that buildSCPArgs uses
 // dst.InternalIP as the destination address when InternalIP is set.
 func TestBuildSCPArgs_DestUsesInternalIP(t *testing.T) {
