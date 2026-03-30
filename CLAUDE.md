@@ -92,6 +92,7 @@ make install  # install to /usr/local/bin/smux
 make clean    # remove ./bin
 ```
 
+Avoid building a binary directly. Always use make command. If make command is not sufficient, suggest a new proper command.
 All tests are source-inspection tests or unit tests; none require a live tmux session. The `writeFakeTmux` helper in `tmux_test.go` injects a fake `tmux` binary via `PATH`.
 
 ## Adding New Config Fields
@@ -107,3 +108,17 @@ All tests are source-inspection tests or unit tests; none require a live tmux se
 - Source-inspection tests use `os.ReadFile("file.go")` and `strings.Contains`.
 - Fake tmux is injected by writing a shell script to a temp dir and prepending it to `PATH`.
 - Never mock the config loader; use `config.Config{}` literals directly.
+
+## Intentionally Untested Coverage
+
+The following scenarios are not covered by `go test ./...` because they require a live SSH daemon on localhost, which is not guaranteed in CI or developer environments. Tests that do real SSH/SFTP network I/O without a bounded timeout can hang indefinitely and were removed.
+
+| Package | Scenario | Reason skipped |
+|---------|----------|----------------|
+| `internal/filetree` | `RemoteListDir` end-to-end via SFTP against a real host | Requires running sshd + passwordless key auth on localhost; no safe timeout boundary |
+| `internal/filetree` | SFTP→SSH shell fallback path via a real host | Same as above |
+| `internal/sshkeys` | `DistributePublicKey` + `RemovePublicKey` round-trip on localhost | Requires running sshd + passwordless key auth on localhost; `DistributePublicKey`/`RemovePublicKey` calls use `context.Background()` with no deadline so can hang indefinitely |
+| `cmd/smux` | TMUX-var gate smoke-test (bootstrap skipped when TMUX is set) | Runs real smux binary; bubbletea opens `/dev/tty` directly and blocks waiting for keyboard input — hangs indefinitely with no TTY isolation. Covered by source-inspection tests in the same file. |
+| `cmd/smux` | Missing-config YAML example printed on first run | Same issue: real binary execution reaches bubbletea TUI loop and hangs. Covered by `TestMissingConfigMessageSourceInspection` (source inspection). |
+
+To verify these paths manually, run smux against a real inventory with a reachable host and exercise the distribute-file mode file picker.

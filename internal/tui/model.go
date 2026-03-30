@@ -212,6 +212,7 @@ func New(cfg *config.Config, opts ...ModelOption) Model {
 		opt(&m)
 	}
 	m.rebuildFlat()
+	m.clampViewport()
 	return m
 }
 
@@ -395,6 +396,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.filterInput, cmd = m.filterInput.Update(msg)
 		m.rebuildFlat()
+		m.clampViewport()
 		return m, cmd
 	}
 
@@ -458,6 +460,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 			m.filterInput.SetValue("")
 			m.filterInput.Blur()
 			m.rebuildFlat()
+			m.clampViewport()
 			return m, nil
 		case tea.KeyEnter:
 			m.state.Phase = BrowsingPhase{}
@@ -467,6 +470,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 			var cmd tea.Cmd
 			m.filterInput, cmd = m.filterInput.Update(msg)
 			m.rebuildFlat()
+			m.clampViewport()
 			return m, cmd
 		}
 	}
@@ -826,6 +830,7 @@ func (m *Model) toggleExpand() {
 	if n.IsCluster() {
 		m.tree.Toggle(n.ClusterName)
 		m.rebuildFlat()
+		m.clampViewport()
 	}
 }
 
@@ -839,6 +844,7 @@ func (m *Model) collapseOrMoveUp() {
 	if n.IsCluster() && m.tree.IsExpanded(n.ClusterName) {
 		m.tree.SetExpanded(n.ClusterName, false)
 		m.rebuildFlat()
+		m.clampViewport()
 		return
 	}
 	if m.view.Cursor > 0 {
@@ -929,11 +935,7 @@ func (m *Model) rebuildFlat() {
 }
 
 func (m *Model) clampViewport() {
-	if m.view.Cursor < m.viewport.YOffset {
-		m.viewport.YOffset = m.view.Cursor
-	} else if m.view.Cursor >= m.viewport.YOffset+m.viewport.Height {
-		m.viewport.YOffset = m.view.Cursor - m.viewport.Height + 1
-	}
+	ClampViewport(&m.viewport, m.view.Cursor, len(m.flatNodes))
 }
 
 // View implements tea.Model.
@@ -988,14 +990,7 @@ func (m Model) View() string {
 
 	// Scrollable item list.
 	listLines := m.renderList()
-	start := m.viewport.YOffset
-	end := start + m.viewport.Height
-	if end > len(listLines) {
-		end = len(listLines)
-	}
-	if start > end {
-		start = end
-	}
+	start, end := VisibleRange(&m.viewport, len(listLines))
 	for _, line := range listLines[start:end] {
 		sb.WriteString(line + "\n")
 	}

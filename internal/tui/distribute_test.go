@@ -78,13 +78,20 @@ func TestDistributeEnterAdvancesStep(t *testing.T) {
 		t.Errorf("after Enter on DestHosts expected step %d, got %d", DistributeStepCopyMode, m.step)
 	}
 
-	// Step 3 → 4: Enter from CopyMode moves to Confirm.
+	// Step 3 → 4: Enter from CopyMode moves to DestPath.
 	m, _ = sendDistributeKey(m, "enter")
-	if m.step != DistributeStepConfirm {
-		t.Errorf("after Enter on CopyMode expected step %d (Confirm), got %d", DistributeStepConfirm, m.step)
+	if m.step != DistributeStepDestPath {
+		t.Errorf("after Enter on CopyMode expected step %d (DestPath), got %d", DistributeStepDestPath, m.step)
 	}
 
-	// Step 4 → 5: Enter from Confirm moves to Execute.
+	// Step 4 → 5: Enter a valid destination path to move to Confirm.
+	m.destPathInput.SetValue("/tmp/dest")
+	m, _ = sendDistributeKey(m, "enter")
+	if m.step != DistributeStepConfirm {
+		t.Errorf("after Enter on DestPath expected step %d (Confirm), got %d", DistributeStepConfirm, m.step)
+	}
+
+	// Step 5 → 6: Enter from Confirm moves to Execute.
 	m, _ = sendDistributeKey(m, "enter")
 	if m.step != DistributeStepExecute {
 		t.Errorf("after Enter on Confirm expected step %d (Execute), got %d", DistributeStepExecute, m.step)
@@ -157,6 +164,8 @@ func TestDistributeQKeyCancelsAndQuits(t *testing.T) {
 		DistributeStepFileBrowse,
 		DistributeStepDestHosts,
 		DistributeStepCopyMode,
+		DistributeStepHubSelect,
+		DistributeStepDestPath,
 		DistributeStepConfirm,
 		DistributeStepExecute,
 	} {
@@ -208,8 +217,16 @@ func TestDistributeViewContainsTitleAndBreadcrumb(t *testing.T) {
 	if !strings.Contains(view, "distribute file") {
 		t.Error("view should contain 'distribute file' title")
 	}
-	// All step labels should appear in the breadcrumb.
-	for _, label := range distributeStepLabels {
+	// All direct-parallel step labels should appear in the breadcrumb.
+	// The hub-select label ("Select Hub") is only shown in hub-spoke mode and
+	// must NOT appear in the default (parallel) breadcrumb.
+	for step, label := range distributeStepLabel {
+		if step == DistributeStepHubSelect {
+			if strings.Contains(view, label) {
+				t.Errorf("parallel-mode breadcrumb should not contain hub-select label %q", label)
+			}
+			continue
+		}
 		if !strings.Contains(view, label) {
 			t.Errorf("view should contain step label %q", label)
 		}
@@ -232,6 +249,8 @@ func TestDistributeViewShowsCurrentStepContent(t *testing.T) {
 		{DistributeStepFileBrowse, "Browse Files"},
 		{DistributeStepDestHosts, "Destination Hosts"},
 		{DistributeStepCopyMode, "Copy Mode"},
+		{DistributeStepHubSelect, "Select Hub Node"},
+		{DistributeStepDestPath, "Destination Path"},
 		{DistributeStepConfirm, "Confirm Distribution"},
 		{DistributeStepExecute, "Execute"},
 	}
@@ -357,15 +376,15 @@ func TestSourceOriginInitialCursor(t *testing.T) {
 	}
 }
 
-// TestSourceOriginListIncludesLocal verifies that the source-origin item list
-// always begins with a "local" entry (empty host field).
+// TestSourceOriginListIncludesLocal verifies that the source-origin flat list
+// always begins with a Local entry.
 func TestSourceOriginListIncludesLocal(t *testing.T) {
 	m := newTestDistributeModel()
-	if len(m.sourceOriginItems) == 0 {
-		t.Fatal("sourceOriginItems must not be empty")
+	if len(m.sourceFlatNodes) == 0 {
+		t.Fatal("sourceFlatNodes must not be empty")
 	}
-	if m.sourceOriginItems[0].host != "" {
-		t.Errorf("first item should be local (host=\"\"), got host=%q", m.sourceOriginItems[0].host)
+	if !m.sourceFlatNodes[0].IsLocal() {
+		t.Errorf("first node should be NodeKindLocal, got kind=%v", m.sourceFlatNodes[0].Kind)
 	}
 }
 
@@ -373,14 +392,15 @@ func TestSourceOriginListIncludesLocal(t *testing.T) {
 // the config are present in the source-origin list after the local entry.
 func TestSourceOriginListIncludesConfiguredHosts(t *testing.T) {
 	m := newTestDistributeModel()
-	// minimalConfig has host-01 and host-02; so list should have 3 items.
-	if len(m.sourceOriginItems) != 3 {
-		t.Errorf("expected 3 source origin items (local + 2 hosts), got %d", len(m.sourceOriginItems))
+	// minimalConfig has host-01 and host-02 in one cluster, so the flat list
+	// is: Local + cluster-header + host-01 + host-02 = 4 nodes.
+	if len(m.sourceFlatNodes) != 4 {
+		t.Errorf("expected 4 source flat nodes (local + cluster + 2 hosts), got %d", len(m.sourceFlatNodes))
 	}
-	// Items 1 and 2 should be the configured hosts.
-	for _, item := range m.sourceOriginItems[1:] {
-		if item.host == "" {
-			t.Errorf("remote item should have non-empty host, got label=%q", item.label)
+	// All NodeKindHost nodes must have a non-nil, non-empty Host.
+	for _, n := range m.sourceFlatNodes {
+		if n.IsHost() && (n.Host == nil || n.Host.Host == "") {
+			t.Errorf("host node should have non-empty Host.Host, got %+v", n)
 		}
 	}
 }
@@ -430,7 +450,7 @@ func TestSourceOriginCursorDoesNotGoNegative(t *testing.T) {
 // last item keeps the cursor on the last item.
 func TestSourceOriginCursorDoesNotExceedList(t *testing.T) {
 	m := newTestDistributeModel()
-	last := len(m.sourceOriginItems) - 1
+	last := len(m.sourceFlatNodes) - 1
 	m.sourceOriginCursor = last
 	m, _ = sendDistributeKey(m, "down")
 	if m.sourceOriginCursor != last {
@@ -462,9 +482,10 @@ func TestSourceOriginEnterPersistsLocalSelection(t *testing.T) {
 // advances to the file-browse step.
 func TestSourceOriginEnterPersistsRemoteSelection(t *testing.T) {
 	m := newTestDistributeModel()
-	// Move cursor to the first remote host (index 1).
+	// Index 0=Local, 1=cluster-header, 2=host-01. Move cursor to host-01.
 	m, _ = sendDistributeKey(m, "down")
-	wantHost := m.sourceOriginItems[1].host
+	m, _ = sendDistributeKey(m, "down")
+	wantHost := m.sourceFlatNodes[2].Host.Host
 
 	m, _ = sendDistributeKey(m, "enter")
 	if m.sourceHost != wantHost {
@@ -525,10 +546,10 @@ func TestSourceOriginAccessor(t *testing.T) {
 		t.Errorf("before selection SourceHost() should be empty, got %q", m.SourceHost())
 	}
 
-	// After selecting a remote host.
-	m.sourceOriginCursor = 1
+	// After selecting a remote host (index 2 = host-01, past the cluster header).
+	m.sourceOriginCursor = 2
+	want := m.sourceFlatNodes[2].Host.Host
 	m, _ = sendDistributeKey(m, "enter")
-	want := m.sourceOriginItems[1].host
 	// Note: m was returned by sendDistributeKey; re-read accessor.
 	fresh := m.SourceHost()
 	if fresh != want {
@@ -561,14 +582,20 @@ func TestDestHostDownMovesCursor(t *testing.T) {
 	m := newTestDistributeModel()
 	m.step = DistributeStepDestHosts
 
+	// minimalConfig has 1 cluster + 2 hosts = 3 flat nodes.
+	// Cursor starts at 0 (cluster header).
 	m, _ = sendDistributeKey(m, "down")
 	if m.destHostCursor != 1 {
 		t.Errorf("after down: expected cursor 1, got %d", m.destHostCursor)
 	}
 	m, _ = sendDistributeKey(m, "j")
-	// minimalConfig has 2 hosts; cursor should stay at 1 (last index).
-	if m.destHostCursor != 1 {
-		t.Errorf("after j at last item: expected cursor 1, got %d", m.destHostCursor)
+	if m.destHostCursor != 2 {
+		t.Errorf("after j: expected cursor 2, got %d", m.destHostCursor)
+	}
+	// At last index (2), another down should stay at 2.
+	m, _ = sendDistributeKey(m, "down")
+	if m.destHostCursor != 2 {
+		t.Errorf("after down at last item: expected cursor 2, got %d", m.destHostCursor)
 	}
 }
 
@@ -609,22 +636,20 @@ func TestDestHostSpaceTogglesSelection(t *testing.T) {
 	}
 }
 
-// TestDestHostEnterPersistsSelection verifies that pressing Enter in step 1
-// stores the selected hosts (in list order) in destHosts and advances to step 2.
+// TestDestHostEnterPersistsSelection verifies that pressing Enter in step 2
+// stores the selected hosts (in list order) in destHosts and advances to step 3.
 func TestDestHostEnterPersistsSelection(t *testing.T) {
 	m := newTestDistributeModel()
 	m.step = DistributeStepDestHosts
 
-	// Select both hosts.
-	m, _ = sendDistributeKey(m, " ")      // select host-01
-	m, _ = sendDistributeKey(m, "down")   // move to host-02
-	m, _ = sendDistributeKey(m, " ")      // select host-02
+	// Cursor starts at 0 (cluster header). Space on cluster selects all hosts.
+	m, _ = sendDistributeKey(m, " ") // select all hosts in cluster
 
 	// Confirm.
 	m, _ = sendDistributeKey(m, "enter")
 
 	if m.step != DistributeStepCopyMode {
-		t.Errorf("after Enter on step 1 expected step %d, got %d", DistributeStepCopyMode, m.step)
+		t.Errorf("after Enter on step 2 expected step %d, got %d", DistributeStepCopyMode, m.step)
 	}
 	if len(m.destHosts) != 2 {
 		t.Errorf("expected 2 dest hosts, got %d", len(m.destHosts))
@@ -694,8 +719,9 @@ func TestDestHostsAccessor(t *testing.T) {
 		t.Errorf("before confirmation DestHosts() should be empty, got %d", len(m.DestHosts()))
 	}
 
-	// Select one host and confirm.
-	m, _ = sendDistributeKey(m, " ")
+	// Move to first host (index 1, past cluster header) and select it.
+	m, _ = sendDistributeKey(m, "down") // move to host-01
+	m, _ = sendDistributeKey(m, " ")    // select host-01
 	m, _ = sendDistributeKey(m, "enter")
 	if len(m.DestHosts()) != 1 {
 		t.Errorf("after confirming one host DestHosts() should have length 1, got %d", len(m.DestHosts()))
@@ -721,7 +747,7 @@ func TestDestHostViewRendersCheckboxes(t *testing.T) {
 	}
 }
 
-// TestDestHostViewShowsSelectionCount verifies that the hint line in step 1
+// TestDestHostViewShowsSelectionCount verifies that the hint line in step 2
 // reflects how many hosts are currently selected.
 func TestDestHostViewShowsSelectionCount(t *testing.T) {
 	m := newTestDistributeModel()
@@ -730,14 +756,161 @@ func TestDestHostViewShowsSelectionCount(t *testing.T) {
 	// Initially 0 selected.
 	view := m.View()
 	if !strings.Contains(view, "0 selected") {
-		t.Error("step 1 view should show '0 selected' initially")
+		t.Error("step 2 view should show '0 selected' initially")
 	}
 
-	// Select one host.
-	m, _ = sendDistributeKey(m, " ")
+	// Move to first host (past cluster header) and select it.
+	m, _ = sendDistributeKey(m, "down") // move to host-01
+	m, _ = sendDistributeKey(m, " ")    // select host-01
 	view = m.View()
 	if !strings.Contains(view, "1 selected") {
-		t.Error("step 1 view should show '1 selected' after one toggle")
+		t.Error("step 2 view should show '1 selected' after one toggle")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Step 2 (dest hosts): filter
+// ---------------------------------------------------------------------------
+
+// TestDestHostFilterActivatesWithSlash verifies that pressing '/' activates
+// the filter input and destFilterActive becomes true.
+func TestDestHostFilterActivatesWithSlash(t *testing.T) {
+	m := newTestDistributeModel()
+	m.step = DistributeStepDestHosts
+
+	m, _ = sendDistributeKey(m, "/")
+	if !m.destFilterActive {
+		t.Error("pressing '/' should activate filter mode")
+	}
+}
+
+// TestDestHostFilterDeactivatesWithEsc verifies that pressing Esc while the
+// filter is active clears the filter text and exits filter mode.
+func TestDestHostFilterDeactivatesWithEsc(t *testing.T) {
+	m := newTestDistributeModel()
+	m.step = DistributeStepDestHosts
+
+	// Activate filter and type something.
+	m, _ = sendDistributeKey(m, "/")
+	m, _ = sendDistributeKey(m, "a")
+	if m.destFilterInput.Value() != "a" {
+		t.Fatalf("expected filter value 'a', got %q", m.destFilterInput.Value())
+	}
+
+	// Esc should clear and deactivate.
+	m, _ = sendDistributeKey(m, "esc")
+	if m.destFilterActive {
+		t.Error("Esc should deactivate filter mode")
+	}
+	if m.destFilterInput.Value() != "" {
+		t.Errorf("Esc should clear filter value, got %q", m.destFilterInput.Value())
+	}
+}
+
+// TestDestHostFilterDeactivatesWithEnter verifies that pressing Enter while the
+// filter is active commits the filter text and exits filter mode.
+func TestDestHostFilterDeactivatesWithEnter(t *testing.T) {
+	m := newTestDistributeModel()
+	m.step = DistributeStepDestHosts
+
+	// Activate filter and type something.
+	m, _ = sendDistributeKey(m, "/")
+	m, _ = sendDistributeKey(m, "h")
+	m, _ = sendDistributeKey(m, "o")
+
+	// Enter should deactivate but keep the filter value.
+	m, _ = sendDistributeKey(m, "enter")
+	if m.destFilterActive {
+		t.Error("Enter should deactivate filter mode")
+	}
+	if m.destFilterInput.Value() != "ho" {
+		t.Errorf("Enter should keep filter value 'ho', got %q", m.destFilterInput.Value())
+	}
+}
+
+// TestDestHostFilterFiltersInRealTime verifies that typing into the filter
+// input rebuilds the flat node list in real time.
+func TestDestHostFilterFiltersInRealTime(t *testing.T) {
+	m := newTestDistributeModel()
+	m.step = DistributeStepDestHosts
+
+	// Initially: 1 cluster + 2 hosts = 3 nodes.
+	initialCount := len(m.destFlatNodes)
+	if initialCount != 3 {
+		t.Fatalf("expected 3 initial flat nodes, got %d", initialCount)
+	}
+
+	// Activate filter and type "01" to match only host-01.
+	m, _ = sendDistributeKey(m, "/")
+	m, _ = sendDistributeKey(m, "0")
+	m, _ = sendDistributeKey(m, "1")
+
+	// Should now show: 1 cluster header + 1 matching host = 2 nodes.
+	if len(m.destFlatNodes) != 2 {
+		t.Errorf("expected 2 flat nodes after filtering for '01', got %d", len(m.destFlatNodes))
+	}
+}
+
+// TestDestHostFilterNoMatchShowsEmptyList verifies that a filter with no
+// matches results in an empty destFlatNodes list.
+func TestDestHostFilterNoMatchShowsEmptyList(t *testing.T) {
+	m := newTestDistributeModel()
+	m.step = DistributeStepDestHosts
+
+	// Activate filter and type something that matches nothing.
+	m, _ = sendDistributeKey(m, "/")
+	m, _ = sendDistributeKey(m, "z")
+	m, _ = sendDistributeKey(m, "z")
+	m, _ = sendDistributeKey(m, "z")
+
+	if len(m.destFlatNodes) != 0 {
+		t.Errorf("expected 0 flat nodes for non-matching filter, got %d", len(m.destFlatNodes))
+	}
+}
+
+// TestDestHostFilterQDoesNotQuit verifies that pressing 'q' while the filter
+// is active types into the filter input rather than quitting the wizard.
+func TestDestHostFilterQDoesNotQuit(t *testing.T) {
+	m := newTestDistributeModel()
+	m.step = DistributeStepDestHosts
+
+	m, _ = sendDistributeKey(m, "/")
+	m, cmd := sendDistributeKey(m, "q")
+
+	if m.cancelled {
+		t.Error("pressing 'q' while filter is active should not cancel the wizard")
+	}
+	if m.done {
+		t.Error("pressing 'q' while filter is active should not mark wizard as done")
+	}
+	// The 'q' should have been typed into the filter input.
+	if m.destFilterInput.Value() != "q" {
+		t.Errorf("expected filter value 'q', got %q", m.destFilterInput.Value())
+	}
+	_ = cmd
+}
+
+// TestDestHostFilterViewShowsFilterLine verifies that the rendered view
+// includes the filter input when active, and the filter value when committed.
+func TestDestHostFilterViewShowsFilterLine(t *testing.T) {
+	m := newTestDistributeModel()
+	m.step = DistributeStepDestHosts
+
+	// Activate filter.
+	m, _ = sendDistributeKey(m, "/")
+	view := m.View()
+	// The view should contain "/" prefix indicating filter mode.
+	if !strings.Contains(view, "/") {
+		t.Error("view should show '/' when filter is active")
+	}
+
+	// Type and commit with Enter.
+	m, _ = sendDistributeKey(m, "h")
+	m, _ = sendDistributeKey(m, "o")
+	m, _ = sendDistributeKey(m, "enter")
+	view = m.View()
+	if !strings.Contains(view, "filter:") || !strings.Contains(view, "ho") {
+		t.Error("view should show committed filter value after Enter")
 	}
 }
 
@@ -767,8 +940,9 @@ func TestFileBrowseLocalTreeCreatedOnEnter(t *testing.T) {
 // a remote host creates a RemoteFileTreeModel with the correct host alias.
 func TestFileBrowseRemoteTreeCreatedOnEnter(t *testing.T) {
 	m := newTestDistributeModel()
-	m, _ = sendDistributeKey(m, "down")          // cursor → 1 (first remote host)
-	wantHost := m.sourceOriginItems[1].host
+	m, _ = sendDistributeKey(m, "down") // cursor → 1 (cluster header)
+	m, _ = sendDistributeKey(m, "down") // cursor → 2 (first remote host)
+	wantHost := m.sourceFlatNodes[2].Host.Host
 	m, _ = sendDistributeKey(m, "enter")
 
 	if m.step != DistributeStepFileBrowse {
@@ -887,30 +1061,32 @@ func TestFileBrowseLocalTreePreservedOnBackNav(t *testing.T) {
 // source host between two FileBrowse visits creates a new remote tree.
 func TestFileBrowseRemoteTreeRecreatedWhenHostChanges(t *testing.T) {
 	m := newTestDistributeModel()
-	if len(m.sourceOriginItems) < 3 {
+	// Need at least Local + cluster + 2 hosts (index 0,1,2,3).
+	if len(m.sourceFlatNodes) < 4 {
 		t.Skip("need at least 2 remote hosts configured")
 	}
 
-	// First visit: select host at index 1.
-	m, _ = sendDistributeKey(m, "down")  // cursor → 1
-	m, _ = sendDistributeKey(m, "enter") // → FileBrowse with host[1]
+	// First visit: navigate to host at index 2 (first host in cluster).
+	m, _ = sendDistributeKey(m, "down")  // cursor → 1 (cluster header)
+	m, _ = sendDistributeKey(m, "down")  // cursor → 2 (host-01)
+	m, _ = sendDistributeKey(m, "enter") // → FileBrowse with host[2]
 	firstTree := m.remoteFileTree
 	if firstTree == nil {
 		t.Fatal("remoteFileTree should be initialised")
 	}
 
-	m, _ = sendDistributeKey(m, "esc") // back to SourceSelect
+	m, _ = sendDistributeKey(m, "esc") // back to SourceSelect (cursor stays at 2)
 
-	// Second visit: move cursor to host[2] and re-enter.
-	m, _ = sendDistributeKey(m, "down") // cursor → 2
-	m, _ = sendDistributeKey(m, "enter") // → FileBrowse with host[2]
+	// Second visit: move cursor to index 3 (host-02) and re-enter.
+	m, _ = sendDistributeKey(m, "down")  // cursor → 3 (host-02)
+	wantHost := m.sourceFlatNodes[3].Host.Host
+	m, _ = sendDistributeKey(m, "enter") // → FileBrowse with host[3]
 
 	if m.remoteFileTree == firstTree {
 		t.Error("remoteFileTree should be recreated when the source host changes")
 	}
-	if m.remoteTreeForHost != m.sourceOriginItems[2].host {
-		t.Errorf("remoteTreeForHost should be %q, got %q",
-			m.sourceOriginItems[2].host, m.remoteTreeForHost)
+	if m.remoteTreeForHost != wantHost {
+		t.Errorf("remoteTreeForHost should be %q, got %q", wantHost, m.remoteTreeForHost)
 	}
 }
 
@@ -918,16 +1094,18 @@ func TestFileBrowseRemoteTreeRecreatedWhenHostChanges(t *testing.T) {
 // FileBrowse with the same remote host preserves the existing tree.
 func TestFileBrowseRemoteTreeReusedWhenSameHostChosen(t *testing.T) {
 	m := newTestDistributeModel()
-	if len(m.sourceOriginItems) < 2 {
+	// Need at least Local + cluster + 1 host (index 0,1,2).
+	if len(m.sourceFlatNodes) < 3 {
 		t.Skip("need at least 1 remote host configured")
 	}
 
-	// Visit FileBrowse with host[1].
-	m, _ = sendDistributeKey(m, "down")  // cursor → 1
+	// Visit FileBrowse with host at index 2 (host-01).
+	m, _ = sendDistributeKey(m, "down")  // cursor → 1 (cluster header)
+	m, _ = sendDistributeKey(m, "down")  // cursor → 2 (host-01)
 	m, _ = sendDistributeKey(m, "enter") // → FileBrowse
 	firstTree := m.remoteFileTree
 
-	m, _ = sendDistributeKey(m, "esc")   // back to SourceSelect (cursor stays at 1)
+	m, _ = sendDistributeKey(m, "esc")   // back to SourceSelect (cursor stays at 2)
 	m, _ = sendDistributeKey(m, "enter") // → FileBrowse again with same host
 
 	if m.remoteFileTree != firstTree {
@@ -1052,7 +1230,7 @@ func TestCopyModeKMovesCursor(t *testing.T) {
 }
 
 // TestCopyModeEnterSelectsParallelByDefault verifies that pressing Enter with
-// the cursor at index 0 selects "parallel" mode and advances to ConfirmStep.
+// the cursor at index 0 selects "parallel" mode and advances to DestPath step.
 func TestCopyModeEnterSelectsParallelByDefault(t *testing.T) {
 	m := newTestDistributeModel()
 	m.step = DistributeStepCopyMode
@@ -1060,9 +1238,9 @@ func TestCopyModeEnterSelectsParallelByDefault(t *testing.T) {
 
 	m, _ = sendDistributeKey(m, "enter")
 
-	if m.step != DistributeStepConfirm {
-		t.Errorf("after Enter on CopyMode expected step %d (Confirm), got %d",
-			DistributeStepConfirm, m.step)
+	if m.step != DistributeStepDestPath {
+		t.Errorf("after Enter on CopyMode expected step %d (DestPath), got %d",
+			DistributeStepDestPath, m.step)
 	}
 	if m.copyMode != "parallel" {
 		t.Errorf("expected copyMode \"parallel\", got %q", m.copyMode)
@@ -1070,7 +1248,8 @@ func TestCopyModeEnterSelectsParallelByDefault(t *testing.T) {
 }
 
 // TestCopyModeEnterSelectsHubAndSpoke verifies that pressing Enter with the
-// cursor at index 1 selects "hub-spoke" mode.
+// cursor at index 1 selects "hub-spoke" mode and advances to the hub-selection
+// step (DistributeStepHubSelect), not directly to DestPath.
 func TestCopyModeEnterSelectsHubAndSpoke(t *testing.T) {
 	m := newTestDistributeModel()
 	m.step = DistributeStepCopyMode
@@ -1078,9 +1257,9 @@ func TestCopyModeEnterSelectsHubAndSpoke(t *testing.T) {
 
 	m, _ = sendDistributeKey(m, "enter")
 
-	if m.step != DistributeStepConfirm {
-		t.Errorf("after Enter (hub-spoke) expected step %d (Confirm), got %d",
-			DistributeStepConfirm, m.step)
+	if m.step != DistributeStepHubSelect {
+		t.Errorf("after Enter (hub-spoke) expected step %d (HubSelect), got %d",
+			DistributeStepHubSelect, m.step)
 	}
 	if m.copyMode != "hub-spoke" {
 		t.Errorf("expected copyMode \"hub-spoke\", got %q", m.copyMode)
@@ -1088,17 +1267,17 @@ func TestCopyModeEnterSelectsHubAndSpoke(t *testing.T) {
 }
 
 // TestCopyModeCursorPreservedOnBackNav verifies that pressing Esc from the
-// Confirm step back to CopyMode preserves the cursor position.
+// HubSelect step back to CopyMode preserves the cursor position.
 func TestCopyModeCursorPreservedOnBackNav(t *testing.T) {
 	m := newTestDistributeModel()
 	m.step = DistributeStepCopyMode
 	m.copyModeCursor = 1
 
-	m, _ = sendDistributeKey(m, "enter") // step 3 → 4 (Confirm)
+	m, _ = sendDistributeKey(m, "enter") // step 3 → 4 (HubSelect, hub-spoke mode)
 	m, _ = sendDistributeKey(m, "esc")   // step 4 → 3 (CopyMode)
 
 	if m.step != DistributeStepCopyMode {
-		t.Fatalf("Esc from Confirm should return to CopyMode, got step %d", m.step)
+		t.Fatalf("Esc from DestPath should return to CopyMode, got step %d", m.step)
 	}
 	if m.copyModeCursor != 1 {
 		t.Errorf("copyModeCursor should be preserved as 1 on back-navigation, got %d", m.copyModeCursor)
@@ -1202,16 +1381,272 @@ func TestCopyModeItemsDefinedCorrectly(t *testing.T) {
 	}
 }
 
-// TestBuildSourceOriginItemsEmptyConfig verifies that buildSourceOriginItems
-// returns exactly the local entry when no hosts are configured.
-func TestBuildSourceOriginItemsEmptyConfig(t *testing.T) {
-	cfg := emptyConfig()
-	items := buildSourceOriginItems(cfg)
-	if len(items) != 1 {
-		t.Errorf("empty config: expected 1 item (local only), got %d", len(items))
+// ---------------------------------------------------------------------------
+// Step 4 (DistributeStepHubSelect): hub node selection (hub-and-spoke only)
+// ---------------------------------------------------------------------------
+
+// newHubSelectModel returns a DistributeModel positioned at DistributeStepHubSelect
+// with hub-spoke mode and two destination hosts pre-populated, ready for
+// hub-selection tests.  copyModeCursor is set to 1 (hub-spoke option) so that
+// back-navigation to CopyMode and re-confirmation reproduces the hub-spoke flow.
+func newHubSelectModel() DistributeModel {
+	m := newTestDistributeModel()
+	m.step = DistributeStepHubSelect
+	m.copyMode = "hub-spoke"
+	m.copyModeCursor = 1 // hub-spoke is the second option (index 1)
+	m.destHosts = []config.ResolvedHost{
+		{Host: "host-01", DisplayName: "host-01"},
+		{Host: "host-02", DisplayName: "host-02"},
 	}
-	if items[0].host != "" {
-		t.Errorf("first item must be local (host=\"\"), got %q", items[0].host)
+	return m
+}
+
+// TestHubSelectInitialCursor verifies that the hub-select cursor starts at 0.
+func TestHubSelectInitialCursor(t *testing.T) {
+	m := newHubSelectModel()
+	if m.hubCursor != 0 {
+		t.Errorf("expected initial hubCursor 0, got %d", m.hubCursor)
+	}
+}
+
+// TestHubSelectDownMovesCursor verifies that down/j advance the cursor.
+func TestHubSelectDownMovesCursor(t *testing.T) {
+	m := newHubSelectModel()
+
+	m, _ = sendDistributeKey(m, "down")
+	if m.hubCursor != 1 {
+		t.Errorf("after down: expected hubCursor 1, got %d", m.hubCursor)
+	}
+	// At last item, down should clamp.
+	m, _ = sendDistributeKey(m, "down")
+	if m.hubCursor != 1 {
+		t.Errorf("down at last item: expected hubCursor 1, got %d", m.hubCursor)
+	}
+}
+
+// TestHubSelectUpMovesCursor verifies that up/k move the cursor towards index 0.
+func TestHubSelectUpMovesCursor(t *testing.T) {
+	m := newHubSelectModel()
+	m.hubCursor = 1
+
+	m, _ = sendDistributeKey(m, "up")
+	if m.hubCursor != 0 {
+		t.Errorf("after up: expected hubCursor 0, got %d", m.hubCursor)
+	}
+	// Up at index 0 should stay at 0.
+	m, _ = sendDistributeKey(m, "up")
+	if m.hubCursor != 0 {
+		t.Errorf("up at top: expected hubCursor 0, got %d", m.hubCursor)
+	}
+}
+
+// TestHubSelectJKMovesCursor verifies j/k navigation in hub selection.
+func TestHubSelectJKMovesCursor(t *testing.T) {
+	m := newHubSelectModel()
+
+	m, _ = sendDistributeKey(m, "j")
+	if m.hubCursor != 1 {
+		t.Errorf("after j: expected hubCursor 1, got %d", m.hubCursor)
+	}
+	m, _ = sendDistributeKey(m, "k")
+	if m.hubCursor != 0 {
+		t.Errorf("after k: expected hubCursor 0, got %d", m.hubCursor)
+	}
+}
+
+// TestHubSelectEnterBlockedWhenNoHosts verifies that Enter does not advance
+// the wizard when the destination list is empty (defensive guard).
+func TestHubSelectEnterBlockedWhenNoHosts(t *testing.T) {
+	m := newHubSelectModel()
+	m.destHosts = nil // force empty list
+
+	m, _ = sendDistributeKey(m, "enter")
+	if m.step != DistributeStepHubSelect {
+		t.Errorf("Enter with empty destHosts should stay on HubSelect, got step %d", m.step)
+	}
+}
+
+// TestHubSelectEnterPersistsHubAndAdvances verifies that pressing Enter with a
+// valid selection persists the hub host and advances to DistributeStepDestPath.
+func TestHubSelectEnterPersistsHubAndAdvances(t *testing.T) {
+	m := newHubSelectModel()
+	// Cursor is at 0 (host-01).
+
+	m, _ = sendDistributeKey(m, "enter")
+
+	if m.step != DistributeStepDestPath {
+		t.Errorf("Enter on HubSelect should advance to DestPath (step %d), got %d",
+			DistributeStepDestPath, m.step)
+	}
+	if m.hubHost.Host != "host-01" {
+		t.Errorf("expected hubHost.Host \"host-01\", got %q", m.hubHost.Host)
+	}
+}
+
+// TestHubSelectEnterPicksCorrectHost verifies that the cursor position
+// determines which host is recorded as the hub.
+func TestHubSelectEnterPicksCorrectHost(t *testing.T) {
+	m := newHubSelectModel()
+	m.hubCursor = 1 // highlight host-02
+
+	m, _ = sendDistributeKey(m, "enter")
+
+	if m.hubHost.Host != "host-02" {
+		t.Errorf("expected hubHost.Host \"host-02\", got %q", m.hubHost.Host)
+	}
+}
+
+// TestHubSelectBackNavFromHubSelectToCopyMode verifies that Esc from
+// HubSelect goes back to CopyMode and that re-confirming hub-spoke advances
+// back to HubSelect (with cursor reset to 0 by the CopyMode handler).
+func TestHubSelectBackNavFromHubSelectToCopyMode(t *testing.T) {
+	m := newHubSelectModel()
+	m.hubCursor = 1 // move to host-02
+
+	// Esc from HubSelect → CopyMode.
+	m, _ = sendDistributeKey(m, "esc")
+	if m.step != DistributeStepCopyMode {
+		t.Fatalf("Esc from HubSelect should return to CopyMode, got step %d", m.step)
+	}
+
+	// Re-confirm hub-spoke via Enter on CopyMode.
+	m, _ = sendDistributeKey(m, "enter")
+
+	if m.step != DistributeStepHubSelect {
+		t.Fatalf("Enter on CopyMode (hub-spoke) should go to HubSelect, got step %d", m.step)
+	}
+	// The CopyMode handler resets hubCursor to 0 on each entry to HubSelect
+	// so the user starts at the top of the list.
+	if m.hubCursor != 0 {
+		t.Errorf("hubCursor should be reset to 0 by CopyMode handler, got %d", m.hubCursor)
+	}
+}
+
+// TestHubSelectEscFromDestPathInParallelSkipsHubSelect verifies that pressing
+// Esc from DestPath in direct-parallel mode goes back to CopyMode directly,
+// skipping the hub-select step entirely.
+func TestHubSelectEscFromDestPathInParallelSkipsHubSelect(t *testing.T) {
+	m := newTestDistributeModel()
+	m.step = DistributeStepDestPath
+	m.copyMode = "parallel"
+
+	m, _ = sendDistributeKey(m, "esc")
+
+	if m.step != DistributeStepCopyMode {
+		t.Errorf("Esc from DestPath (parallel) should go to CopyMode, got step %d", m.step)
+	}
+}
+
+// TestHubSelectEscFromDestPathInHubSpokeGoesToHubSelect verifies that pressing
+// Esc from DestPath in hub-and-spoke mode returns to the hub-selection step.
+func TestHubSelectEscFromDestPathInHubSpokeGoesToHubSelect(t *testing.T) {
+	m := newTestDistributeModel()
+	m.step = DistributeStepDestPath
+	m.copyMode = "hub-spoke"
+
+	m, _ = sendDistributeKey(m, "esc")
+
+	if m.step != DistributeStepHubSelect {
+		t.Errorf("Esc from DestPath (hub-spoke) should go to HubSelect, got step %d", m.step)
+	}
+}
+
+// TestHubSelectViewContainsHosts verifies that the hub-selection view renders
+// all destination hosts.
+func TestHubSelectViewContainsHosts(t *testing.T) {
+	m := newHubSelectModel()
+	view := m.View()
+
+	for _, h := range m.destHosts {
+		if !strings.Contains(view, h.DisplayName) {
+			t.Errorf("hub-select view should contain host %q", h.DisplayName)
+		}
+	}
+}
+
+// TestHubSelectViewShowsStepNumber verifies that the hub-select view renders
+// the correct step number (5 of 8 for hub-spoke mode).
+func TestHubSelectViewShowsStepNumber(t *testing.T) {
+	m := newHubSelectModel()
+	view := m.View()
+
+	if !strings.Contains(view, "5 of 8") {
+		t.Errorf("hub-select view should show '5 of 8', view:\n%s", view)
+	}
+}
+
+// TestHubSelectBreadcrumbShows8Steps verifies that the breadcrumb contains 8
+// step labels when hub-spoke mode is active.
+func TestHubSelectBreadcrumbShows8Steps(t *testing.T) {
+	m := newHubSelectModel()
+	view := m.View()
+
+	// All 8 hub-spoke step labels should appear in the breadcrumb.
+	for step, label := range distributeStepLabel {
+		if step == DistributeStepRetryConfirm {
+			continue // not a breadcrumb step
+		}
+		if !strings.Contains(view, label) {
+			t.Errorf("hub-spoke breadcrumb should contain step label %q", label)
+		}
+	}
+}
+
+// TestHubSelectHubHostAccessor verifies that HubHost() returns the persisted
+// hub host after selection.
+func TestHubSelectHubHostAccessor(t *testing.T) {
+	m := newHubSelectModel()
+
+	// Before selection, HubHost() returns zero-value.
+	if m.HubHost().Host != "" {
+		t.Errorf("HubHost() before selection should be empty, got %q", m.HubHost().Host)
+	}
+
+	// Select host-01.
+	m, _ = sendDistributeKey(m, "enter")
+	if m.HubHost().Host != "host-01" {
+		t.Errorf("HubHost() after selection: expected \"host-01\", got %q", m.HubHost().Host)
+	}
+}
+
+// TestConfirmStepShowsHubForHubSpoke verifies that the Confirm step view
+// includes the selected hub host name when in hub-and-spoke mode.
+func TestConfirmStepShowsHubForHubSpoke(t *testing.T) {
+	m := newTestDistributeModel()
+	m.step = DistributeStepConfirm
+	m.copyMode = "hub-spoke"
+	m.hubHost = config.ResolvedHost{Host: "hub.example.com", DisplayName: "hub.example.com"}
+
+	view := m.View()
+	if !strings.Contains(view, "hub.example.com") {
+		t.Errorf("confirm step (hub-spoke) should display the selected hub host, view:\n%s", view)
+	}
+}
+
+// TestConfirmStepNoHubForParallel verifies that the Confirm step view does NOT
+// display a Hub field when in direct-parallel mode.
+func TestConfirmStepNoHubForParallel(t *testing.T) {
+	m := newTestDistributeModel()
+	m.step = DistributeStepConfirm
+	m.copyMode = "parallel"
+
+	view := m.View()
+	if strings.Contains(view, "Hub:") {
+		t.Error("confirm step (parallel) should not display a Hub field")
+	}
+}
+
+// TestBuildSourceFlatListEmptyConfig verifies that buildSourceFlatList returns
+// exactly the local entry when no hosts are configured.
+func TestBuildSourceFlatListEmptyConfig(t *testing.T) {
+	cfg := emptyConfig()
+	state := NewTreeState(cfg.ClusterNames())
+	nodes := buildSourceFlatList(cfg, &state, "")
+	if len(nodes) != 1 {
+		t.Errorf("empty config: expected 1 node (local only), got %d", len(nodes))
+	}
+	if !nodes[0].IsLocal() {
+		t.Errorf("first node must be NodeKindLocal, got kind=%v", nodes[0].Kind)
 	}
 }
 
@@ -1260,16 +1695,16 @@ func TestConfirmStepEnterAdvancesToExecute(t *testing.T) {
 	}
 }
 
-// TestConfirmStepEscGoesBackToCopyMode verifies that pressing Esc from
-// DistributeStepConfirm moves back to DistributeStepCopyMode.
-func TestConfirmStepEscGoesBackToCopyMode(t *testing.T) {
+// TestConfirmStepEscGoesBackToDestPath verifies that pressing Esc from
+// DistributeStepConfirm moves back to DistributeStepDestPath.
+func TestConfirmStepEscGoesBackToDestPath(t *testing.T) {
 	m := newTestDistributeModel()
 	m.step = DistributeStepConfirm
 
 	m, _ = sendDistributeKey(m, "esc")
-	if m.step != DistributeStepCopyMode {
-		t.Errorf("Esc from Confirm should go back to CopyMode (step %d), got %d",
-			DistributeStepCopyMode, m.step)
+	if m.step != DistributeStepDestPath {
+		t.Errorf("Esc from Confirm should go back to DestPath (step %d), got %d",
+			DistributeStepDestPath, m.step)
 	}
 }
 
@@ -1286,16 +1721,17 @@ func TestConfirmStepChecksumPreservedOnBackNav(t *testing.T) {
 		t.Fatal("verifyChecksum should be true after Space")
 	}
 
-	// Go back to CopyMode.
+	// Go back to DestPath.
 	m, _ = sendDistributeKey(m, "esc")
-	if m.step != DistributeStepCopyMode {
-		t.Fatalf("Esc should return to CopyMode, got step %d", m.step)
+	if m.step != DistributeStepDestPath {
+		t.Fatalf("Esc should return to DestPath, got step %d", m.step)
 	}
 
-	// Advance to Confirm again via Enter.
+	// Advance to Confirm again via Enter with a valid path.
+	m.destPathInput.SetValue("/tmp/dest")
 	m, _ = sendDistributeKey(m, "enter")
 	if m.step != DistributeStepConfirm {
-		t.Fatalf("Enter on CopyMode should go to Confirm, got step %d", m.step)
+		t.Fatalf("Enter on DestPath should go to Confirm, got step %d", m.step)
 	}
 
 	// Checksum state must be preserved.
@@ -1368,15 +1804,19 @@ func TestConfirmStepViewShowsChecksumCheckbox(t *testing.T) {
 }
 
 // TestConfirmStepViewShowsDestPath verifies that the confirm view renders the
-// destination path, falling back to "(same as source)" when it is empty.
+// destination path. When destPath is empty (which should not happen in normal
+// flow, since the dest-path step is mandatory), the view shows "(not set)".
 func TestConfirmStepViewShowsDestPath(t *testing.T) {
 	m := newTestDistributeModel()
 	m.step = DistributeStepConfirm
 
-	// Empty destPath → show fallback.
+	// Empty destPath → show "(not set)" (no implicit fallback to source path).
 	view := m.View()
-	if !strings.Contains(view, "same as source") {
-		t.Error("confirm view should show '(same as source)' when destPath is empty")
+	if !strings.Contains(view, "not set") {
+		t.Error("confirm view should show '(not set)' when destPath is empty")
+	}
+	if strings.Contains(view, "same as source") {
+		t.Error("confirm view must not fall back to '(same as source)' — destination path is mandatory")
 	}
 
 	// Explicit destPath.
@@ -1787,7 +2227,7 @@ func TestRetryConfirmViewNoBreadcrumb(t *testing.T) {
 
 	// The breadcrumb step labels (Browse Files, Select Destinations, etc.)
 	// should not appear in the retry-confirm view.
-	for _, label := range distributeStepLabels {
+	for _, label := range distributeStepLabel {
 		if strings.Contains(view, label) {
 			t.Errorf("retry-confirm view should not show normal breadcrumb label %q", label)
 		}
@@ -1825,5 +2265,636 @@ func TestRetryConfirmEnterThenEnterStartsExecution(t *testing.T) {
 
 	if !m.executeStarted {
 		t.Error("expected executeStarted = true after Enter on Execute step following retry confirm")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Step 4 (DistributeStepDestPath): input validation — non-empty paths accepted
+// ---------------------------------------------------------------------------
+
+// TestDestPathAbsolutePathAccepted verifies that a standard absolute path is
+// accepted without further validation and advances to DistributeStepConfirm.
+func TestDestPathAbsolutePathAccepted(t *testing.T) {
+	m := newTestDistributeModel()
+	m.step = DistributeStepDestPath
+	m.destPathInput.SetValue("/tmp/deploy")
+
+	m, _ = sendDistributeKey(m, "enter")
+
+	if m.step != DistributeStepConfirm {
+		t.Errorf("absolute path should advance to Confirm (step %d), got step %d",
+			DistributeStepConfirm, m.step)
+	}
+	if m.destPath != "/tmp/deploy" {
+		t.Errorf("destPath should be %q, got %q", "/tmp/deploy", m.destPath)
+	}
+	if m.destPathErr != "" {
+		t.Errorf("destPathErr should be empty for valid path, got %q", m.destPathErr)
+	}
+}
+
+// TestDestPathRelativePathAccepted verifies that a relative path (no leading
+// slash) is accepted without further validation.  No path format check is
+// performed beyond ensuring the input is non-empty.
+func TestDestPathRelativePathAccepted(t *testing.T) {
+	m := newTestDistributeModel()
+	m.step = DistributeStepDestPath
+	m.destPathInput.SetValue("relative/path/to/dest")
+
+	m, _ = sendDistributeKey(m, "enter")
+
+	if m.step != DistributeStepConfirm {
+		t.Errorf("relative path should advance to Confirm, got step %d", m.step)
+	}
+	if m.destPath != "relative/path/to/dest" {
+		t.Errorf("destPath should be %q, got %q", "relative/path/to/dest", m.destPath)
+	}
+}
+
+// TestDestPathSingleCharacterAccepted verifies that even a minimal single-
+// character non-whitespace path is accepted.
+func TestDestPathSingleCharacterAccepted(t *testing.T) {
+	m := newTestDistributeModel()
+	m.step = DistributeStepDestPath
+	m.destPathInput.SetValue("a")
+
+	m, _ = sendDistributeKey(m, "enter")
+
+	if m.step != DistributeStepConfirm {
+		t.Errorf("single-char path should advance to Confirm, got step %d", m.step)
+	}
+	if m.destPath != "a" {
+		t.Errorf("destPath should be %q, got %q", "a", m.destPath)
+	}
+}
+
+// TestDestPathSpecialCharsAccepted verifies that paths containing special
+// characters (hyphens, underscores, dots, tildes) are accepted without
+// further validation.
+func TestDestPathSpecialCharsAccepted(t *testing.T) {
+	m := newTestDistributeModel()
+	m.step = DistributeStepDestPath
+	specialPath := "/opt/my-app_v2.1/data~backup"
+	m.destPathInput.SetValue(specialPath)
+
+	m, _ = sendDistributeKey(m, "enter")
+
+	if m.step != DistributeStepConfirm {
+		t.Errorf("path with special chars should advance to Confirm, got step %d", m.step)
+	}
+	if m.destPath != specialPath {
+		t.Errorf("destPath should be %q, got %q", specialPath, m.destPath)
+	}
+}
+
+// TestDestPathWithSpacesAccepted verifies that paths containing spaces are
+// accepted.  No path character validation is performed; only blank/whitespace-
+// only paths are rejected.
+func TestDestPathWithSpacesAccepted(t *testing.T) {
+	m := newTestDistributeModel()
+	m.step = DistributeStepDestPath
+	pathWithSpaces := "/path with spaces/file"
+	m.destPathInput.SetValue(pathWithSpaces)
+
+	m, _ = sendDistributeKey(m, "enter")
+
+	if m.step != DistributeStepConfirm {
+		t.Errorf("path with internal spaces should advance to Confirm, got step %d", m.step)
+	}
+	if m.destPath != pathWithSpaces {
+		t.Errorf("destPath should be %q, got %q", pathWithSpaces, m.destPath)
+	}
+}
+
+// TestDestPathLongPathAccepted verifies that a long (but non-empty) path is
+// accepted without error.  No path length limit is enforced beyond the
+// textinput's CharLimit.
+func TestDestPathLongPathAccepted(t *testing.T) {
+	m := newTestDistributeModel()
+	m.step = DistributeStepDestPath
+	// 100-character path, well within typical OS limits and the 512 CharLimit.
+	longPath := "/very/long/path/that/spans/many/directory/components/and/reaches/a/significant/length/on/disk"
+	m.destPathInput.SetValue(longPath)
+
+	m, _ = sendDistributeKey(m, "enter")
+
+	if m.step != DistributeStepConfirm {
+		t.Errorf("long path should advance to Confirm, got step %d", m.step)
+	}
+	if m.destPath != longPath {
+		t.Errorf("destPath should be %q, got %q", longPath, m.destPath)
+	}
+}
+
+// TestDestPathLeadingTrailingSpacesTrimmed verifies that leading/trailing
+// whitespace is stripped from the input before being stored in destPath.
+// The path "/tmp/dest" with surrounding spaces should be stored as "/tmp/dest".
+func TestDestPathLeadingTrailingSpacesTrimmed(t *testing.T) {
+	m := newTestDistributeModel()
+	m.step = DistributeStepDestPath
+	m.destPathInput.SetValue("  /tmp/dest  ")
+
+	m, _ = sendDistributeKey(m, "enter")
+
+	if m.step != DistributeStepConfirm {
+		t.Errorf("path with surrounding spaces should advance to Confirm, got step %d", m.step)
+	}
+	if m.destPath != "/tmp/dest" {
+		t.Errorf("destPath should have surrounding whitespace trimmed to %q, got %q",
+			"/tmp/dest", m.destPath)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Step 4 (DistributeStepDestPath): input validation — blank/whitespace rejected
+// ---------------------------------------------------------------------------
+
+// TestDestPathBlankInputRejectedWithRePrompt verifies that pressing Enter with
+// an empty input does NOT advance to DistributeStepConfirm.  The wizard stays
+// on DistributeStepDestPath and sets a non-empty destPathErr message.
+func TestDestPathBlankInputRejectedWithRePrompt(t *testing.T) {
+	m := newTestDistributeModel()
+	m.step = DistributeStepDestPath
+	// destPathInput value is "" by default.
+
+	m, _ = sendDistributeKey(m, "enter")
+
+	if m.step != DistributeStepDestPath {
+		t.Errorf("blank input should keep wizard on DistributeStepDestPath (%d), got step %d",
+			DistributeStepDestPath, m.step)
+	}
+	if m.destPathErr == "" {
+		t.Error("blank input should set a non-empty destPathErr error message")
+	}
+	if m.destPath != "" {
+		t.Errorf("blank input should not update destPath, got %q", m.destPath)
+	}
+}
+
+// TestDestPathWhitespaceOnlyInputRejectedWithRePrompt verifies that a string
+// of only spaces/tabs is treated the same as blank: the wizard stays on the
+// DestPath step and an error message is shown.
+func TestDestPathWhitespaceOnlyInputRejectedWithRePrompt(t *testing.T) {
+	for _, ws := range []string{" ", "   ", "\t", "  \t  "} {
+		m := newTestDistributeModel()
+		m.step = DistributeStepDestPath
+		m.destPathInput.SetValue(ws)
+
+		m, _ = sendDistributeKey(m, "enter")
+
+		if m.step != DistributeStepDestPath {
+			t.Errorf("whitespace-only input %q should keep wizard on DistributeStepDestPath, got step %d",
+				ws, m.step)
+		}
+		if m.destPathErr == "" {
+			t.Errorf("whitespace-only input %q should set a non-empty destPathErr", ws)
+		}
+		if m.destPath != "" {
+			t.Errorf("whitespace-only input %q should not update destPath, got %q", ws, m.destPath)
+		}
+	}
+}
+
+// TestDestPathErrorClearedOnNextKeystroke verifies that the error message is
+// cleared as soon as the user types any character after a failed blank
+// submission.  This provides responsive feedback without stale error text.
+func TestDestPathErrorClearedOnNextKeystroke(t *testing.T) {
+	m := newTestDistributeModel()
+	m.step = DistributeStepDestPath
+
+	// Submit blank to trigger the error.
+	m, _ = sendDistributeKey(m, "enter")
+	if m.destPathErr == "" {
+		t.Fatal("precondition: destPathErr should be set after blank submission")
+	}
+
+	// Typing any character should clear the error.
+	m, _ = sendDistributeKey(m, "a")
+	if m.destPathErr != "" {
+		t.Errorf("destPathErr should be cleared after typing a character, got %q", m.destPathErr)
+	}
+}
+
+// TestDestPathViewShowsErrorOnBlankSubmission verifies that the rendered view
+// for DistributeStepDestPath includes the error message text when destPathErr
+// is non-empty (i.e., after the user attempted to submit a blank path).
+func TestDestPathViewShowsErrorOnBlankSubmission(t *testing.T) {
+	m := newTestDistributeModel()
+	m.step = DistributeStepDestPath
+
+	// Submit blank to trigger the error.
+	m, _ = sendDistributeKey(m, "enter")
+	if m.destPathErr == "" {
+		t.Fatal("precondition: destPathErr should be set after blank submission")
+	}
+
+	view := m.View()
+	if !strings.Contains(view, m.destPathErr) {
+		t.Errorf("view should contain the error message %q, but it does not.\nView:\n%s",
+			m.destPathErr, view)
+	}
+}
+
+// TestDestPathRepeatedBlankSubmissionsKeepOnStep verifies that submitting a
+// blank path multiple times in a row always keeps the wizard on DistributeStepDestPath
+// with an error set.
+func TestDestPathRepeatedBlankSubmissionsKeepOnStep(t *testing.T) {
+	m := newTestDistributeModel()
+	m.step = DistributeStepDestPath
+
+	for i := 0; i < 3; i++ {
+		m, _ = sendDistributeKey(m, "enter")
+		if m.step != DistributeStepDestPath {
+			t.Errorf("attempt %d: blank input should keep wizard on DistributeStepDestPath, got step %d",
+				i+1, m.step)
+		}
+		if m.destPathErr == "" {
+			t.Errorf("attempt %d: destPathErr should be set after blank submission", i+1)
+		}
+	}
+}
+
+// TestDestPathValidInputAfterRejectionAdvances verifies that after a rejected
+// blank submission, providing a valid non-empty path on the next Enter press
+// successfully advances the wizard to DistributeStepConfirm.
+func TestDestPathValidInputAfterRejectionAdvances(t *testing.T) {
+	m := newTestDistributeModel()
+	m.step = DistributeStepDestPath
+
+	// First attempt: blank — should be rejected.
+	m, _ = sendDistributeKey(m, "enter")
+	if m.step != DistributeStepDestPath {
+		t.Fatalf("blank input should stay on DistributeStepDestPath, got step %d", m.step)
+	}
+
+	// Second attempt: provide a valid path and confirm.
+	m.destPathInput.SetValue("/opt/deploy")
+	m, _ = sendDistributeKey(m, "enter")
+
+	if m.step != DistributeStepConfirm {
+		t.Errorf("valid path after rejection should advance to Confirm (step %d), got step %d",
+			DistributeStepConfirm, m.step)
+	}
+	if m.destPath != "/opt/deploy" {
+		t.Errorf("destPath should be %q after valid submission, got %q", "/opt/deploy", m.destPath)
+	}
+	if m.destPathErr != "" {
+		t.Errorf("destPathErr should be cleared after valid submission, got %q", m.destPathErr)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Post-execution retry hint display (AC 1)
+// ---------------------------------------------------------------------------
+
+// makeExecuteDoneModelWithFailures returns a DistributeModel in the Execute
+// step that has completed execution with the given hosts marked as failed.
+// This simulates the state after a distribution run where some hosts failed.
+func makeExecuteDoneModelWithFailures(failedHosts []string) DistributeModel {
+	hosts := make([]config.ResolvedHost, len(failedHosts))
+	for i, h := range failedHosts {
+		hosts[i] = config.ResolvedHost{Host: h, DisplayName: h}
+	}
+	m := NewDistributeModel(minimalConfig(), 80, 24)
+	m.step = DistributeStepExecute
+	m.destHosts = hosts
+	m.sourcePaths = []string{"/data/file.tar.gz"}
+	m.destPath = "/tmp/dest"
+	m.copyMode = "parallel"
+	// Simulate completed execution with all hosts failed.
+	m.executeStarted = true
+	m.executeDone = true
+	m.hostProgress = make(map[string]executor.TransferStatus)
+	for _, h := range hosts {
+		m.hostProgress[h.Host] = executor.TransferFailed
+	}
+	return m
+}
+
+// makeExecuteDoneModelAllSucceeded returns a DistributeModel in the Execute
+// step where execution completed with all hosts succeeded.
+func makeExecuteDoneModelAllSucceeded(hosts []string) DistributeModel {
+	resolved := make([]config.ResolvedHost, len(hosts))
+	for i, h := range hosts {
+		resolved[i] = config.ResolvedHost{Host: h, DisplayName: h}
+	}
+	m := NewDistributeModel(minimalConfig(), 80, 24)
+	m.step = DistributeStepExecute
+	m.destHosts = resolved
+	m.sourcePaths = []string{"/data/file.tar.gz"}
+	m.destPath = "/tmp/dest"
+	m.copyMode = "parallel"
+	m.executeStarted = true
+	m.executeDone = true
+	m.hostProgress = make(map[string]executor.TransferStatus)
+	for _, h := range resolved {
+		m.hostProgress[h.Host] = executor.TransferDone
+	}
+	return m
+}
+
+// TestExecuteStepRetryHintShownWhenFailuresExist verifies that the Execute step
+// view includes a retry hint ("r") when execution has completed with at least
+// one failed host transfer.
+func TestExecuteStepRetryHintShownWhenFailuresExist(t *testing.T) {
+	m := makeExecuteDoneModelWithFailures([]string{"host1.example.com", "host2.example.com"})
+
+	view := m.View()
+	if !strings.Contains(view, "r") {
+		t.Error("execute step view should contain 'r' retry hint when there are failures")
+	}
+	if !strings.Contains(view, "retry") {
+		t.Error("execute step view should mention 'retry' when there are failed hosts")
+	}
+}
+
+// TestExecuteStepRetryHintNotShownOnFullSuccess verifies that the Execute step
+// view does NOT include a retry hint when all transfers succeeded.
+func TestExecuteStepRetryHintNotShownOnFullSuccess(t *testing.T) {
+	m := makeExecuteDoneModelAllSucceeded([]string{"host1.example.com", "host2.example.com"})
+
+	view := m.View()
+	// When all succeeded, "r retry failed" hint should not be present.
+	if strings.Contains(view, "r retry") {
+		t.Error("execute step view should NOT show 'r retry' hint when all transfers succeeded")
+	}
+}
+
+// TestExecuteStepRetryHintNotShownDuringExecution verifies that the retry hint
+// is NOT shown while execution is still in progress (only shown after completion).
+func TestExecuteStepRetryHintNotShownDuringExecution(t *testing.T) {
+	m := NewDistributeModel(minimalConfig(), 80, 24)
+	m.step = DistributeStepExecute
+	m.destHosts = []config.ResolvedHost{
+		{Host: "host1.example.com", DisplayName: "host1.example.com"},
+	}
+	m.sourcePaths = []string{"/data/file.tar.gz"}
+	m.destPath = "/tmp/dest"
+	m.copyMode = "parallel"
+	// Simulate execution in progress (started but not done).
+	m.executeStarted = true
+	m.executeDone = false
+	m.hostProgress = map[string]executor.TransferStatus{
+		"host1.example.com": executor.TransferInProgress,
+	}
+
+	view := m.View()
+	if strings.Contains(view, "r retry") {
+		t.Error("execute step view should NOT show 'r retry' hint while execution is in progress")
+	}
+}
+
+// TestExecuteStepRetryHintNotShownBeforeExecution verifies that the retry hint
+// is NOT shown before execution has started.
+func TestExecuteStepRetryHintNotShownBeforeExecution(t *testing.T) {
+	m := NewDistributeModel(minimalConfig(), 80, 24)
+	m.step = DistributeStepExecute
+	m.destHosts = []config.ResolvedHost{
+		{Host: "host1.example.com", DisplayName: "host1.example.com"},
+	}
+	m.sourcePaths = []string{"/data/file.tar.gz"}
+	m.destPath = "/tmp/dest"
+	m.copyMode = "parallel"
+	// Not started.
+	m.executeStarted = false
+	m.executeDone = false
+
+	view := m.View()
+	if strings.Contains(view, "r retry") {
+		t.Error("execute step view should NOT show 'r retry' hint before execution starts")
+	}
+}
+
+// TestExecuteStepRetryKeyIgnoredBeforeExecutionComplete verifies that pressing
+// 'r' before execution is complete has no effect on the model.
+func TestExecuteStepRetryKeyIgnoredBeforeExecutionComplete(t *testing.T) {
+	m := NewDistributeModel(minimalConfig(), 80, 24)
+	m.step = DistributeStepExecute
+	m.destHosts = []config.ResolvedHost{
+		{Host: "host1.example.com", DisplayName: "host1.example.com"},
+	}
+	m.sourcePaths = []string{"/data/file.tar.gz"}
+	m.destPath = "/tmp/dest"
+	m.copyMode = "parallel"
+	m.executeStarted = true
+	m.executeDone = false
+	m.hostProgress = map[string]executor.TransferStatus{
+		"host1.example.com": executor.TransferInProgress,
+	}
+
+	updated, _ := sendDistributeKey(m, "r")
+	// Should still be on Execute step with no state change.
+	if updated.step != DistributeStepExecute {
+		t.Errorf("pressing 'r' during execution should stay on Execute step, got step %d", updated.step)
+	}
+	if updated.executeDone {
+		t.Error("pressing 'r' during execution should not set executeDone")
+	}
+}
+
+// TestExecuteStepRetryKeyIgnoredWhenNoFailures verifies that pressing 'r' when
+// all transfers succeeded is a no-op.
+func TestExecuteStepRetryKeyIgnoredWhenNoFailures(t *testing.T) {
+	m := makeExecuteDoneModelAllSucceeded([]string{"host1.example.com"})
+
+	updated, _ := sendDistributeKey(m, "r")
+	// Should stay on Execute step (no retry needed).
+	if updated.step != DistributeStepExecute {
+		t.Errorf("pressing 'r' with no failures should stay on Execute step, got step %d", updated.step)
+	}
+}
+
+// TestExecuteStepRetryKeyTransitionsToRetryConfirmWhenFailuresExist verifies
+// that pressing 'r' after execution completes with failures transitions the
+// model to DistributeStepRetryConfirm.
+func TestExecuteStepRetryKeyTransitionsToRetryConfirmWhenFailuresExist(t *testing.T) {
+	m := makeExecuteDoneModelWithFailures([]string{"host1.example.com", "host2.example.com"})
+
+	updated, _ := sendDistributeKey(m, "r")
+	if updated.step != DistributeStepRetryConfirm {
+		t.Errorf("pressing 'r' with failures should transition to DistributeStepRetryConfirm, got step %d", updated.step)
+	}
+}
+
+// TestExecuteStepRetryKeyOnlyIncludesFailedHosts verifies that after pressing
+// 'r', the retry model only contains the hosts that failed (not the successful ones).
+func TestExecuteStepRetryKeyOnlyIncludesFailedHosts(t *testing.T) {
+	// Mix of succeeded and failed hosts.
+	allHosts := []config.ResolvedHost{
+		{Host: "ok.example.com", DisplayName: "ok.example.com"},
+		{Host: "fail.example.com", DisplayName: "fail.example.com"},
+	}
+	m := NewDistributeModel(minimalConfig(), 80, 24)
+	m.step = DistributeStepExecute
+	m.destHosts = allHosts
+	m.sourcePaths = []string{"/data/file.tar.gz"}
+	m.destPath = "/tmp/dest"
+	m.copyMode = "parallel"
+	m.executeStarted = true
+	m.executeDone = true
+	m.hostProgress = map[string]executor.TransferStatus{
+		"ok.example.com":   executor.TransferDone,
+		"fail.example.com": executor.TransferFailed,
+	}
+
+	updated, _ := sendDistributeKey(m, "r")
+	if updated.step != DistributeStepRetryConfirm {
+		t.Fatalf("expected DistributeStepRetryConfirm after 'r', got step %d", updated.step)
+	}
+	// The retry model's destHosts should only contain the failed host.
+	if len(updated.destHosts) != 1 {
+		t.Errorf("retry model should have 1 failed host, got %d", len(updated.destHosts))
+	}
+	if len(updated.destHosts) > 0 && updated.destHosts[0].Host != "fail.example.com" {
+		t.Errorf("retry model should include 'fail.example.com', got %q", updated.destHosts[0].Host)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// AC 8: Checksum verification toggle continues to work during retries
+// ---------------------------------------------------------------------------
+
+// TestRetryConfirmSpaceTogglesChecksum verifies that pressing Space in
+// DistributeStepRetryConfirm toggles verifyChecksum on and off, mirroring
+// the behaviour of the normal DistributeStepConfirm step.
+func TestRetryConfirmSpaceTogglesChecksum(t *testing.T) {
+	params := makeRetryParams("h1.example.com")
+	m := NewRetryDistributeModel(minimalConfig(), 80, 24, params)
+
+	if m.verifyChecksum {
+		t.Error("verifyChecksum should be false initially in retry model")
+	}
+
+	// First Space toggles on.
+	m, _ = sendDistributeKey(m, " ")
+	if !m.verifyChecksum {
+		t.Error("after first Space in retry-confirm verifyChecksum should be true")
+	}
+
+	// Second Space toggles off.
+	m, _ = sendDistributeKey(m, " ")
+	if m.verifyChecksum {
+		t.Error("after second Space in retry-confirm verifyChecksum should be false")
+	}
+}
+
+// TestRetryConfirmSpaceDoesNotAdvanceStep verifies that pressing Space in the
+// retry-confirm step only toggles the checkbox and does not advance to Execute.
+func TestRetryConfirmSpaceDoesNotAdvanceStep(t *testing.T) {
+	params := makeRetryParams("h1.example.com")
+	m := NewRetryDistributeModel(minimalConfig(), 80, 24, params)
+
+	m, _ = sendDistributeKey(m, " ")
+
+	if m.step != DistributeStepRetryConfirm {
+		t.Errorf("Space should not advance from retry-confirm; expected step %d, got %d",
+			DistributeStepRetryConfirm, m.step)
+	}
+}
+
+// TestRetryConfirmViewShowsChecksumCheckbox verifies that the retry-confirm
+// step view renders the checksum verification checkbox.
+func TestRetryConfirmViewShowsChecksumCheckbox(t *testing.T) {
+	params := makeRetryParams("h1.example.com")
+	m := NewRetryDistributeModel(minimalConfig(), 80, 24, params)
+
+	view := m.View()
+
+	if !strings.Contains(view, "checksum") {
+		t.Error("retry-confirm view should show the checksum verification checkbox")
+	}
+}
+
+// TestRetryConfirmViewChecksumUncheckedByDefault verifies that the checksum
+// checkbox is shown as unchecked by default.
+func TestRetryConfirmViewChecksumUncheckedByDefault(t *testing.T) {
+	params := makeRetryParams("h1.example.com")
+	m := NewRetryDistributeModel(minimalConfig(), 80, 24, params)
+
+	view := m.View()
+
+	if !strings.Contains(view, "[ ]") {
+		t.Error("retry-confirm view should show unchecked checkbox [ ] by default")
+	}
+}
+
+// TestRetryConfirmViewChecksumCheckedAfterToggle verifies that after pressing
+// Space the checkbox displays as checked.
+func TestRetryConfirmViewChecksumCheckedAfterToggle(t *testing.T) {
+	params := makeRetryParams("h1.example.com")
+	m := NewRetryDistributeModel(minimalConfig(), 80, 24, params)
+
+	m, _ = sendDistributeKey(m, " ")
+	view := m.View()
+
+	if !strings.Contains(view, "[✓]") {
+		t.Error("retry-confirm view should show checked checkbox [✓] after Space toggle")
+	}
+}
+
+// TestRetryConfirmViewHintIncludesSpaceToggle verifies that the hint line in
+// the retry-confirm step mentions the space key for toggling the checkbox.
+func TestRetryConfirmViewHintIncludesSpaceToggle(t *testing.T) {
+	params := makeRetryParams("h1.example.com")
+	m := NewRetryDistributeModel(minimalConfig(), 80, 24, params)
+
+	view := m.View()
+
+	if !strings.Contains(view, "space") {
+		t.Error("retry-confirm hint should mention 'space' for toggling the checksum checkbox")
+	}
+}
+
+// TestRetryChecksumPreservedFromExecuteStep verifies that when pressing 'r'
+// to retry after execution, the current verifyChecksum value is preserved in
+// the new retry model so the user does not have to re-toggle it.
+func TestRetryChecksumPreservedFromExecuteStep(t *testing.T) {
+	m := makeExecuteDoneModelWithFailures([]string{"fail.example.com"})
+	// Enable checksum on the execute-step model before pressing 'r'.
+	m.verifyChecksum = true
+
+	retryModel, _ := sendDistributeKey(m, "r")
+
+	if !retryModel.verifyChecksum {
+		t.Error("verifyChecksum should be preserved (true) in the retry model created by 'r'")
+	}
+}
+
+// TestRetryChecksumFalsePreservedFromExecuteStep verifies that a false
+// verifyChecksum on the execute-step model is also correctly preserved when
+// the retry model is created.
+func TestRetryChecksumFalsePreservedFromExecuteStep(t *testing.T) {
+	m := makeExecuteDoneModelWithFailures([]string{"fail.example.com"})
+	// verifyChecksum is false by default — confirm it stays false in retry.
+	m.verifyChecksum = false
+
+	retryModel, _ := sendDistributeKey(m, "r")
+
+	if retryModel.verifyChecksum {
+		t.Error("verifyChecksum should be preserved (false) in the retry model created by 'r'")
+	}
+}
+
+// TestRetryChecksumStateNotLostOnConfirm verifies that after the user toggles
+// the checksum checkbox in DistributeStepRetryConfirm and presses Enter to
+// confirm the retry, the verifyChecksum state is carried into the Execute step.
+func TestRetryChecksumStateNotLostOnConfirm(t *testing.T) {
+	params := makeRetryParams("h1.example.com")
+	m := NewRetryDistributeModel(minimalConfig(), 80, 24, params)
+
+	// Toggle checksum on in retry-confirm.
+	m, _ = sendDistributeKey(m, " ")
+	if !m.verifyChecksum {
+		t.Fatal("verifyChecksum should be true after Space in retry-confirm")
+	}
+
+	// Confirm the retry.
+	m, _ = sendDistributeKey(m, "enter")
+
+	if m.step != DistributeStepExecute {
+		t.Fatalf("expected Execute step after confirming retry, got step %d", m.step)
+	}
+	if !m.verifyChecksum {
+		t.Error("verifyChecksum should remain true after confirming the retry-confirm step")
 	}
 }
