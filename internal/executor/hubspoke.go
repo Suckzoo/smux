@@ -184,9 +184,12 @@ func buildHubSCPCommand(
 	// Source: the file path on the hub.
 	parts = append(parts, hubShellEscape(hubPath))
 	// Destination: [user@]spoke:destPath
-	destAddr := spoke.EffectiveAddress()
+	// Use RemoteReachableAddress instead of EffectiveAddress because this
+	// command runs on the hub, not locally. The hub cannot resolve local
+	// SSH aliases; it needs the real hostname or IP.
+	destAddr := spoke.RemoteReachableAddress()
 	if spoke.User != "" {
-		destAddr = spoke.User + "@" + spoke.EffectiveAddress()
+		destAddr = spoke.User + "@" + spoke.RemoteReachableAddress()
 	}
 	parts = append(parts, hubShellEscape(destAddr+":"+destPath))
 

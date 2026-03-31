@@ -12,7 +12,11 @@ type NodeKind int
 const (
 	// NodeKindCluster represents a collapsible cluster header row.
 	NodeKindCluster NodeKind = iota
-	// NodeKindHost represents a leaf host row nested under a cluster.
+	// NodeKindSubgroup represents a collapsible subgroup header row nested
+	// under a cluster. Subgroup nodes are only present when the cluster
+	// uses the subgroups config form.
+	NodeKindSubgroup
+	// NodeKindHost represents a leaf host row nested under a cluster or subgroup.
 	NodeKindHost
 	// NodeKindLocal represents the synthetic "Local (this machine)" entry
 	// in the source-origin picker; it is not associated with any cluster.
@@ -22,17 +26,23 @@ const (
 // TreeNode is a single displayable row in the cluster tree.
 //
 // Cluster nodes (NodeKindCluster) can be expanded or collapsed; their
-// expanded/collapsed state is tracked by TreeState. Host nodes
-// (NodeKindHost) are children of a cluster and are shown only when the
-// parent cluster is expanded (or when a filter forces expansion).
+// expanded/collapsed state is tracked by TreeState. Subgroup nodes
+// (NodeKindSubgroup) are nested under clusters and also expandable.
+// Host nodes (NodeKindHost) are children of a cluster or subgroup and
+// are shown only when the parent is expanded (or when a filter forces
+// expansion).
 type TreeNode struct {
-	Kind        NodeKind
-	ClusterName string               // set for both cluster and host nodes
-	Host        *config.ResolvedHost // non-nil only for NodeKindHost
+	Kind         NodeKind
+	ClusterName  string               // set for cluster, subgroup, and host nodes
+	SubgroupName string               // set for subgroup and host-under-subgroup nodes
+	Host         *config.ResolvedHost // non-nil only for NodeKindHost
 }
 
 // IsCluster reports whether this node represents a cluster header.
 func (n TreeNode) IsCluster() bool { return n.Kind == NodeKindCluster }
+
+// IsSubgroup reports whether this node represents a subgroup header.
+func (n TreeNode) IsSubgroup() bool { return n.Kind == NodeKindSubgroup }
 
 // IsHost reports whether this node represents a leaf host entry.
 func (n TreeNode) IsHost() bool { return n.Kind == NodeKindHost }
@@ -47,13 +57,33 @@ type TreeState struct {
 	expanded map[string]bool // cluster name → is expanded?
 }
 
-// NewTreeState creates a TreeState with all named clusters initially expanded.
+// NewTreeState creates a TreeState with all named clusters and subgroups
+// initially expanded.
 func NewTreeState(clusterNames []string) TreeState {
 	expanded := make(map[string]bool, len(clusterNames))
 	for _, name := range clusterNames {
 		expanded[name] = true
 	}
 	return TreeState{expanded: expanded}
+}
+
+// NewTreeStateFromConfig creates a TreeState with all clusters and subgroups
+// initially expanded. Subgroups use composite keys "cluster/subgroup".
+func NewTreeStateFromConfig(cfg *config.Config) TreeState {
+	expanded := make(map[string]bool)
+	for _, name := range cfg.ClusterNames() {
+		expanded[name] = true
+		cluster := cfg.Clusters[name]
+		for _, sgName := range cluster.SubgroupNames() {
+			expanded[name+"/"+sgName] = true
+		}
+	}
+	return TreeState{expanded: expanded}
+}
+
+// subgroupKey returns the composite key used for tracking subgroup expansion.
+func subgroupKey(clusterName, subgroupName string) string {
+	return clusterName + "/" + subgroupName
 }
 
 // IsExpanded reports whether the named cluster is currently expanded.
@@ -121,35 +151,87 @@ func BuildFlatList(cfg *config.Config, state *TreeState, filter string) []TreeNo
 		cluster := cfg.Clusters[name]
 		clusterNameMatches := filter == "" || fuzzyMatch(filter, name)
 
-		// Collect hosts that pass the filter.
-		var matchedHosts []config.ResolvedHost
-		for _, h := range cluster.Hosts {
-			r := h.Resolve(name, cluster.Defaults)
-			if filter == "" ||
-				clusterNameMatches ||
-				fuzzyMatch(filter, r.DisplayName) {
-				matchedHosts = append(matchedHosts, r)
+		hasSubgroups := len(cluster.Subgroups) > 0
+
+		if hasSubgroups {
+			// Subgroup-based cluster: cluster > subgroup > host.
+			anyMatch := false
+			type sgData struct {
+				sgName string
+				hosts  []config.ResolvedHost
 			}
-		}
+			var subgroups []sgData
 
-		// Skip the entire cluster when a filter is active and nothing matches.
-		if filter != "" && len(matchedHosts) == 0 {
-			continue
-		}
+			for _, sgName := range cluster.SubgroupNames() {
+				sg := cluster.Subgroups[sgName]
+				sgNameMatches := clusterNameMatches || fuzzyMatch(filter, sgName)
 
-		// Emit the cluster header node.
-		nodes = append(nodes, TreeNode{Kind: NodeKindCluster, ClusterName: name})
+				var matched []config.ResolvedHost
+				for i, h := range sg.Hosts {
+					r := h.ResolveInSubgroup(name, cluster.Defaults, sgName, sg, i)
+					if filter == "" || sgNameMatches || fuzzyMatch(filter, r.DisplayName) {
+						matched = append(matched, r)
+					}
+				}
+				if len(matched) > 0 || (filter != "" && sgNameMatches) {
+					subgroups = append(subgroups, sgData{sgName: sgName, hosts: matched})
+					anyMatch = true
+				}
+			}
 
-		// Emit host nodes when the cluster is expanded, or when a filter is
-		// active (active filter forces expansion so results are visible).
-		if state.IsExpanded(name) || filter != "" {
-			for i := range matchedHosts {
-				h := matchedHosts[i]
-				nodes = append(nodes, TreeNode{
-					Kind:        NodeKindHost,
-					ClusterName: name,
-					Host:        &h,
-				})
+			if filter != "" && !anyMatch {
+				continue
+			}
+
+			nodes = append(nodes, TreeNode{Kind: NodeKindCluster, ClusterName: name})
+
+			if state.IsExpanded(name) || filter != "" {
+				for _, sg := range subgroups {
+					nodes = append(nodes, TreeNode{
+						Kind:         NodeKindSubgroup,
+						ClusterName:  name,
+						SubgroupName: sg.sgName,
+					})
+
+					sgKey := subgroupKey(name, sg.sgName)
+					if state.IsExpanded(sgKey) || filter != "" {
+						for i := range sg.hosts {
+							h := sg.hosts[i]
+							nodes = append(nodes, TreeNode{
+								Kind:         NodeKindHost,
+								ClusterName:  name,
+								SubgroupName: sg.sgName,
+								Host:         &h,
+							})
+						}
+					}
+				}
+			}
+		} else {
+			// Flat cluster: cluster > host (existing behavior).
+			var matchedHosts []config.ResolvedHost
+			for _, h := range cluster.Hosts {
+				r := h.Resolve(name, cluster.Defaults)
+				if filter == "" || clusterNameMatches || fuzzyMatch(filter, r.DisplayName) {
+					matchedHosts = append(matchedHosts, r)
+				}
+			}
+
+			if filter != "" && len(matchedHosts) == 0 {
+				continue
+			}
+
+			nodes = append(nodes, TreeNode{Kind: NodeKindCluster, ClusterName: name})
+
+			if state.IsExpanded(name) || filter != "" {
+				for i := range matchedHosts {
+					h := matchedHosts[i]
+					nodes = append(nodes, TreeNode{
+						Kind:        NodeKindHost,
+						ClusterName: name,
+						Host:        &h,
+					})
+				}
 			}
 		}
 	}

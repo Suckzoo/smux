@@ -35,9 +35,9 @@ func TestHubRetry_HubFails_SpokeErrMentionsHub(t *testing.T) {
 	ctx := context.Background()
 	go func() {
 		defer close(ch)
-		runHubSpokeRetryWithProgress(ctx,
+		runSpokePullRetryWithProgress(ctx,
 			config.ResolvedHost{},
-			"/local/file.txt",
+			[]string{"/local/file.txt"},
 			dstHosts,
 			"/remote/file.txt",
 			fakeTempKP(),
@@ -83,9 +83,9 @@ func TestHubRetry_HubFails_MultipleSpokesAllReportedFailed(t *testing.T) {
 	ctx := context.Background()
 	go func() {
 		defer close(ch)
-		runHubSpokeRetryWithProgress(ctx,
+		runSpokePullRetryWithProgress(ctx,
 			config.ResolvedHost{},
-			"/local/file.txt",
+			[]string{"/local/file.txt"},
 			all,
 			"/remote/file.txt",
 			fakeTempKP(),
@@ -125,9 +125,9 @@ func TestHubRetry_HubFails_NoFanOutAttempted(t *testing.T) {
 	ctx := context.Background()
 	go func() {
 		defer close(ch)
-		runHubSpokeRetryWithProgress(ctx,
+		runSpokePullRetryWithProgress(ctx,
 			config.ResolvedHost{},
-			"/local/file.txt",
+			[]string{"/local/file.txt"},
 			all,
 			"/remote/file.txt",
 			fakeTempKP(),
@@ -159,9 +159,9 @@ func TestHubRetry_HubFails_EmptyDstHosts_NoPanic(t *testing.T) {
 
 	ctx := context.Background()
 	// Should not panic.
-	runHubSpokeRetryWithProgress(ctx,
+	runSpokePullRetryWithProgress(ctx,
 		config.ResolvedHost{},
-		"/local/file.txt",
+		[]string{"/local/file.txt"},
 		nil, // empty dstHosts
 		"/remote/file.txt",
 		fakeTempKP(),

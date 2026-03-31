@@ -24,7 +24,6 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/Suckzoo/smux/internal/config"
-	"github.com/Suckzoo/smux/internal/dirtystate"
 	"github.com/Suckzoo/smux/internal/executor"
 	"github.com/Suckzoo/smux/internal/sshkeys"
 )
@@ -144,22 +143,14 @@ func (m *DistributeModel) startExecution() tea.Cmd {
 		ctx := context.Background()
 
 		if len(srcPaths) == 0 || len(dstHosts) == 0 {
-			// Nothing to transfer; channel closes immediately.
 			return
 		}
 
-		// Use the first selected path as the source file.
-		// Multiple-file selection is not yet handled; the first path is used.
 		srcPath := srcPaths[0]
 
 		// Generate a fresh temporary keypair for this operation.
 		kp, err := sshkeys.Generate()
 		if err != nil {
-			// Signal setup failure via executeCompleteMsg embedded in the
-			// channel-close path; the close triggers executeCompleteMsg with
-			// zero setupErr so we need an alternative route.  We write a
-			// single synthetic ProgressUpdate with status TransferFailed for
-			// every host to surface the error.
 			for _, h := range dstHosts {
 				ch <- executor.ProgressUpdate{
 					Host:   h,
@@ -171,115 +162,124 @@ func (m *DistributeModel) startExecution() tea.Cmd {
 		}
 		defer func() { _ = kp.DeleteKeyFiles() }()
 
-		// Distribute the public key to all destination hosts.
-		// Failures are surfaced as TransferFailed progress updates so the
-		// user sees per-host granularity.
-		var reachable []config.ResolvedHost
-		for _, h := range dstHosts {
-			if err := sshkeys.DistributePublicKey(ctx, h, kp.PublicKey); err != nil {
-				ch <- executor.ProgressUpdate{
-					Host:   h,
-					Status: executor.TransferFailed,
-					Err:    fmt.Errorf("key distribution failed: %w", err),
-				}
-			} else {
-				reachable = append(reachable, h)
-			}
-		}
-
-		if len(reachable) == 0 {
-			return
-		}
-
-		// Ensure the destination directory exists on every reachable host
-		// before starting transfers.  Hosts for which mkdir -p fails are
-		// removed from the reachable set and reported as TransferFailed so
-		// the user sees per-host granularity.
-		var mkdirReady []config.ResolvedHost
-		for _, h := range reachable {
-			if mkErr := mkdirOnHost(ctx, h, dstPath, kp); mkErr != nil {
-				ch <- executor.ProgressUpdate{
-					Host:   h,
-					Status: executor.TransferFailed,
-					Err:    fmt.Errorf("mkdir -p failed: %w", mkErr),
-				}
-			} else {
-				mkdirReady = append(mkdirReady, h)
-			}
-		}
-		if len(mkdirReady) == 0 {
-			return
-		}
-		reachable = mkdirReady
-
-		// Execute the transfer phase.
 		switch mode {
 		case "hub-spoke":
+			// Spoke-pull mode: distribute key to hub only, push files to hub,
+			// resolve hub's private IP, then each spoke pulls from hub.
 			if retryHubHost != nil {
-				// Retry path: enforce hub-first ordering using the original hub.
-				// The hub may or may not be in the failed-hosts set; the retry
-				// function handles both cases correctly.
-				runHubSpokeRetryWithProgress(ctx, srcHost, srcPath, reachable, dstPath, kp, ch, *retryHubHost)
+				runSpokePullRetryWithProgress(ctx, srcHost, srcPaths, dstHosts, dstPath, kp, ch, *retryHubHost)
 			} else {
-				runHubSpokeWithProgress(ctx, srcHost, srcPath, reachable, dstPath, kp, ch)
+				runSpokePullWithProgress(ctx, srcHost, srcPaths, dstHosts, dstPath, kp, ch)
 			}
-		default: // "parallel" or empty
-			executor.RunParallelWithProgress(ctx, srcHost, srcPath, reachable, dstPath, kp, ch)
-		}
 
-		// Cleanup the temporary keypair immediately after the operation
-		// completes (or partially completes). CleanupAfterParallel removes
-		// kp from every host that received it, records any SSH failures in
-		// the persistent dirty state, and deletes the local keypair files.
-		// The defer above is an additional safety net for local file cleanup.
-		_ = executor.CleanupAfterParallel(ctx, kp, reachable)
+		default: // "parallel" or empty
+			// Direct-parallel mode: distribute key to all dests, mkdir, scp.
+			var reachable []config.ResolvedHost
+			for _, h := range dstHosts {
+				if err := sshkeys.DistributePublicKey(ctx, h, kp.PublicKey); err != nil {
+					ch <- executor.ProgressUpdate{
+						Host:   h,
+						Status: executor.TransferFailed,
+						Err:    fmt.Errorf("key distribution failed: %w", err),
+					}
+				} else {
+					reachable = append(reachable, h)
+				}
+			}
+			if len(reachable) == 0 {
+				return
+			}
+
+			var mkdirReady []config.ResolvedHost
+			for _, h := range reachable {
+				if mkErr := mkdirOnHost(ctx, h, dstPath, kp); mkErr != nil {
+					ch <- executor.ProgressUpdate{
+						Host:   h,
+						Status: executor.TransferFailed,
+						Err:    fmt.Errorf("mkdir -p failed: %w", mkErr),
+					}
+				} else {
+					mkdirReady = append(mkdirReady, h)
+				}
+			}
+			if len(mkdirReady) == 0 {
+				return
+			}
+
+			executor.RunParallelWithProgress(ctx, srcHost, srcPath, mkdirReady, dstPath, kp, ch)
+			_ = executor.CleanupAfterParallel(ctx, kp, mkdirReady)
+		}
 	}()
 
 	return waitForProgress(ch)
 }
 
-// runHubSpokeWithProgress orchestrates hub-and-spoke distribution with live
-// progress updates.  It sends TransferInProgress + TransferDone/TransferFailed
-// for the hub-push phase, then delegates to doHubFanOutWithProgress for the
-// fan-out phase.
+// runSpokePullWithProgress orchestrates spoke-pull distribution with live
+// progress updates. Phase 1 pushes all source files to the hub. Phase 2
+// resolves the hub's private IP via CIDR, then each spoke pulls all files.
 //
-// The hub is dstHosts[0].  All remaining hosts are spokes.
-func runHubSpokeWithProgress(
+// The hub is dstHosts[0]. All remaining hosts are spokes.
+func runSpokePullWithProgress(
 	ctx context.Context,
 	srcHost config.ResolvedHost,
-	srcPath string,
+	srcPaths []string,
 	dstHosts []config.ResolvedHost,
 	dstPath string,
 	kp *sshkeys.TempKeyPair,
 	ch chan<- executor.ProgressUpdate,
 ) {
-	if len(dstHosts) == 0 {
+	if len(dstHosts) == 0 || len(srcPaths) == 0 {
 		return
 	}
 
 	hub := dstHosts[0]
 	spokes := dstHosts[1:]
 
-	// --- Phase 1: push source → hub ---
-	ch <- executor.ProgressUpdate{Host: hub, Status: executor.TransferInProgress}
-
-	hubResult := executor.PushToHub(ctx, srcHost, srcPath, hub, dstPath, kp)
-	if !hubResult.Success {
+	// Distribute key to hub only.
+	if err := sshkeys.DistributePublicKey(ctx, hub, kp.PublicKey); err != nil {
 		ch <- executor.ProgressUpdate{
 			Host:   hub,
 			Status: executor.TransferFailed,
-			Err:    hubResult.Err,
-			Stderr: hubResult.Stderr,
+			Err:    fmt.Errorf("key distribution to hub failed: %w", err),
 		}
-		// Mark remaining spokes as failed too (hub push failed, so no fan-out).
 		for _, spoke := range spokes {
 			ch <- executor.ProgressUpdate{
 				Host:   spoke,
 				Status: executor.TransferFailed,
-				Err:    fmt.Errorf("hub push failed; fan-out skipped"),
+				Err:    fmt.Errorf("hub setup failed; spoke-pull skipped"),
 			}
 		}
 		return
+	}
+	defer func() { _ = executor.CleanupAfterParallel(ctx, kp, []config.ResolvedHost{hub}) }()
+
+	// Use directory form so scp puts files inside the dir.
+	hubDir := dstPath
+	if !strings.HasSuffix(hubDir, "/") {
+		hubDir += "/"
+	}
+
+	// --- Phase 1: push all source files to hub ---
+	ch <- executor.ProgressUpdate{Host: hub, Status: executor.TransferInProgress}
+
+	for _, srcPath := range srcPaths {
+		hubResult := executor.PushToHub(ctx, srcHost, srcPath, hub, hubDir, kp)
+		if !hubResult.Success {
+			ch <- executor.ProgressUpdate{
+				Host:   hub,
+				Status: executor.TransferFailed,
+				Err:    hubResult.Err,
+				Stderr: hubResult.Stderr,
+			}
+			for _, spoke := range spokes {
+				ch <- executor.ProgressUpdate{
+					Host:   spoke,
+					Status: executor.TransferFailed,
+					Err:    fmt.Errorf("hub push failed; spoke-pull skipped"),
+				}
+			}
+			return
+		}
 	}
 	ch <- executor.ProgressUpdate{Host: hub, Status: executor.TransferDone}
 
@@ -287,95 +287,58 @@ func runHubSpokeWithProgress(
 		return
 	}
 
-	// --- Phase 2: fan out hub → spokes ---
-	doHubFanOutWithProgress(ctx, hub, dstPath, spokes, ch)
-}
+	// Build hub file paths for all source files.
+	var hubFilePaths []string
+	for _, srcPath := range srcPaths {
+		hubFilePaths = append(hubFilePaths, hubDir+path.Base(srcPath))
+	}
 
-// doHubFanOutWithProgress generates a hub keypair, distributes it to spokes,
-// and fans out the file from hub to all spokes with live progress updates.
-//
-// It handles Phase 2 of both initial and retry hub-and-spoke distribution.
-// A fresh HubKeyPair is generated on the hub; on success its public key is
-// distributed to each spoke before the fan-out.  Spokes for which key
-// distribution fails are reported as TransferFailed and excluded from the
-// fan-out.  The hub keypair is cleaned up (from spokes and from the hub)
-// when the function returns.
-func doHubFanOutWithProgress(
-	ctx context.Context,
-	hub config.ResolvedHost,
-	dstPath string,
-	spokes []config.ResolvedHost,
-	ch chan<- executor.ProgressUpdate,
-) {
-	// Generate a hub keypair for hub-to-spoke authentication.
-	hubKP, err := sshkeys.GenerateOnHub(ctx, hub)
+	// --- Phase 2: resolve hub private IP, then spoke-pull ---
+	hubPrivateIP, err := executor.ResolvePrivateIP(ctx, hub)
 	if err != nil {
 		for _, spoke := range spokes {
 			ch <- executor.ProgressUpdate{
 				Host:   spoke,
 				Status: executor.TransferFailed,
-				Err:    fmt.Errorf("hub keypair generation failed: %w", err),
+				Err:    fmt.Errorf("hub IP resolution failed: %w", err),
 			}
 		}
 		return
 	}
 
-	// Collect spoke hosts that successfully received the hub public key so
-	// that deferred cleanup can target exactly those hosts.
-	var reachableSpokes []config.ResolvedHost
-
-	// Cleanup the hub keypair immediately when this function returns,
-	// regardless of whether the fan-out succeeded or partially failed.
-	// CleanupHubKeypair removes the hub's public key from every spoke's
-	// authorized_keys, deletes the hub's temp key directory, and records
-	// any SSH failures in the persistent dirty state.
-	defer func() {
-		dirty, loadErr := dirtystate.Load()
-		if loadErr != nil {
-			// Non-fatal: proceed with an empty state so cleanup is
-			// attempted even if the existing state file is unreadable.
-			dirty = &dirtystate.State{}
-		}
-		_ = sshkeys.CleanupHubKeypair(ctx, hubKP, reachableSpokes, dirty)
-		_ = dirtystate.Save(dirty)
-	}()
-
-	// Distribute the hub's public key to all spokes.
-	for _, spoke := range spokes {
-		if err := sshkeys.DistributePublicKey(ctx, spoke, hubKP.PublicKey); err != nil {
+	privKeyContent, err := kp.PrivateKeyContent()
+	if err != nil {
+		for _, spoke := range spokes {
 			ch <- executor.ProgressUpdate{
 				Host:   spoke,
 				Status: executor.TransferFailed,
-				Err:    fmt.Errorf("hub key distribution failed: %w", err),
+				Err:    fmt.Errorf("read private key: %w", err),
 			}
-		} else {
-			reachableSpokes = append(reachableSpokes, spoke)
 		}
+		return
 	}
 
-	if len(reachableSpokes) > 0 {
-		executor.FanOutFromHubWithProgress(ctx, hub, dstPath, reachableSpokes, dstPath, hubKP, ch)
+	hubUser := hub.User
+	if hubUser == "" {
+		hubUser = "root"
 	}
+
+	executor.SpokePullWithProgress(ctx, spokes, hubUser, hubPrivateIP, hubFilePaths, hubDir, privKeyContent, ch)
 }
 
-// runHubSpokeRetryWithProgress is the retry-path counterpart of
-// runHubSpokeWithProgress.  It enforces hub-first ordering using the known
-// original hub host (retryHub), which may or may not appear in dstHosts.
+// runSpokePullRetryWithProgress is the retry-path counterpart of
+// runSpokePullWithProgress. It enforces hub-first ordering using the known
+// original hub host (retryHub).
 //
 //   - If retryHub IS in dstHosts (the hub failed previously): re-push source →
-//     hub first.  If this push fails, all remaining hosts in dstHosts are
-//     reported as TransferFailed and the function returns immediately — no
-//     spoke fan-out is attempted.  If the hub push succeeds, the fan-out
-//     phase proceeds to the remaining spoke hosts.
-//
-//   - If retryHub is NOT in dstHosts (the hub succeeded previously; only
-//     spokes failed): skip the push phase and go straight to the fan-out
-//     phase using retryHub as the hub.  The file is assumed to already exist
-//     on the hub from the prior operation.
-func runHubSpokeRetryWithProgress(
+//     hub first. If this push fails, all spokes are reported as failed.
+//   - If retryHub is NOT in dstHosts (only spokes failed): skip the push phase
+//     and go straight to spoke-pull. The file is assumed to already exist on
+//     the hub from the prior operation.
+func runSpokePullRetryWithProgress(
 	ctx context.Context,
 	srcHost config.ResolvedHost,
-	srcPath string,
+	srcPaths []string,
 	dstHosts []config.ResolvedHost,
 	dstPath string,
 	kp *sshkeys.TempKeyPair,
@@ -385,6 +348,19 @@ func runHubSpokeRetryWithProgress(
 	if len(dstHosts) == 0 {
 		return
 	}
+
+	// Distribute key to hub for auth.
+	if err := sshkeys.DistributePublicKey(ctx, retryHub, kp.PublicKey); err != nil {
+		for _, h := range dstHosts {
+			ch <- executor.ProgressUpdate{
+				Host:   h,
+				Status: executor.TransferFailed,
+				Err:    fmt.Errorf("key distribution to hub failed: %w", err),
+			}
+		}
+		return
+	}
+	defer func() { _ = executor.CleanupAfterParallel(ctx, kp, []config.ResolvedHost{retryHub}) }()
 
 	// Partition dstHosts: find hub (if present) and collect spokes.
 	hubIdx := -1
@@ -402,40 +378,77 @@ func runHubSpokeRetryWithProgress(
 		}
 	}
 
-	// --- Phase 1 (conditional): re-push source → hub if hub is in retry set ---
+	// Compute hub file paths (same logic as runSpokePullWithProgress).
+	hubDir := dstPath
+	if !strings.HasSuffix(hubDir, "/") {
+		hubDir += "/"
+	}
+	var hubFilePaths []string
+	for _, sp := range srcPaths {
+		hubFilePaths = append(hubFilePaths, hubDir+path.Base(sp))
+	}
+
+	// Phase 1 (conditional): re-push all source files to hub if hub is in retry set.
 	if hubIdx >= 0 {
 		ch <- executor.ProgressUpdate{Host: retryHub, Status: executor.TransferInProgress}
 
-		hubResult := executor.PushToHub(ctx, srcHost, srcPath, retryHub, dstPath, kp)
-		if !hubResult.Success {
-			// Hub retry failed: report hub failure and do NOT attempt spoke
-			// fan-out.  All spoke hosts are reported as failed so the user
-			// sees the full picture in the TUI.
-			ch <- executor.ProgressUpdate{
-				Host:   retryHub,
-				Status: executor.TransferFailed,
-				Err:    hubResult.Err,
-				Stderr: hubResult.Stderr,
-			}
-			for _, spoke := range spokes {
+		for _, srcPath := range srcPaths {
+			hubResult := executor.PushToHub(ctx, srcHost, srcPath, retryHub, hubDir, kp)
+			if !hubResult.Success {
 				ch <- executor.ProgressUpdate{
-					Host:   spoke,
+					Host:   retryHub,
 					Status: executor.TransferFailed,
-					Err:    fmt.Errorf("hub retry failed; spoke fan-out skipped"),
+					Err:    hubResult.Err,
+					Stderr: hubResult.Stderr,
 				}
+				for _, spoke := range spokes {
+					ch <- executor.ProgressUpdate{
+						Host:   spoke,
+						Status: executor.TransferFailed,
+						Err:    fmt.Errorf("hub retry failed; spoke-pull skipped"),
+					}
+				}
+				return
 			}
-			return
 		}
 		ch <- executor.ProgressUpdate{Host: retryHub, Status: executor.TransferDone}
 	}
 
 	if len(spokes) == 0 {
-		// Only the hub was retried and it succeeded; nothing more to do.
 		return
 	}
 
-	// --- Phase 2: fan out hub → spokes ---
-	doHubFanOutWithProgress(ctx, retryHub, dstPath, spokes, ch)
+	// Phase 2: resolve hub private IP, then spoke-pull.
+	hubPrivateIP, err := executor.ResolvePrivateIP(ctx, retryHub)
+	if err != nil {
+		for _, spoke := range spokes {
+			ch <- executor.ProgressUpdate{
+				Host:   spoke,
+				Status: executor.TransferFailed,
+				Err:    fmt.Errorf("hub IP resolution failed: %w", err),
+			}
+		}
+		return
+	}
+
+	privKeyContent, err := kp.PrivateKeyContent()
+	if err != nil {
+		for _, spoke := range spokes {
+			ch <- executor.ProgressUpdate{
+				Host:   spoke,
+				Status: executor.TransferFailed,
+				Err:    fmt.Errorf("read private key: %w", err),
+			}
+		}
+		return
+	}
+
+	hubUser := retryHub.User
+	if hubUser == "" {
+		hubUser = "root"
+	}
+
+	executor.SpokePullWithProgress(ctx, spokes, hubUser, hubPrivateIP, hubFilePaths, hubDir, privKeyContent, ch)
 }
 
 // ---------------------------------------------------------------------------
@@ -549,7 +562,7 @@ func (m DistributeModel) renderExecuteStepWithProgress() string {
 		sb.WriteString("\n\n")
 		sb.WriteString(m.renderOperationSummary())
 		sb.WriteString("\n\n")
-		sb.WriteString(hintStyle.Render("enter to start  esc back  q quit"))
+		sb.WriteString(hintStyle.Render("enter to start  esc back  q host list"))
 		return sb.String()
 	}
 
@@ -563,9 +576,9 @@ func (m DistributeModel) renderExecuteStepWithProgress() string {
 		sb.WriteString(m.renderCompletionSummary())
 		sb.WriteString("\n\n")
 		if len(m.failedHosts()) > 0 {
-			sb.WriteString(hintStyle.Render("j/k select  enter view error  r retry failed  esc back  q quit"))
+			sb.WriteString(hintStyle.Render("j/k select  enter view error  r retry failed  esc back  q host list"))
 		} else {
-			sb.WriteString(hintStyle.Render("esc back  q quit"))
+			sb.WriteString(hintStyle.Render("esc back  q host list"))
 		}
 	}
 

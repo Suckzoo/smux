@@ -2,7 +2,7 @@
 //
 // These tests verify that startExecution() routes hub-and-spoke retry
 // operations through runHubSpokeRetryWithProgress (which enforces hub-first
-// ordering) rather than the normal runHubSpokeWithProgress path.
+// ordering) rather than the normal runSpokePullWithProgress path.
 //
 // The unit tests for runHubSpokeRetryWithProgress itself live in
 // hub_spoke_retry_test.go (AC 4 coverage).  This file focuses on the
@@ -190,7 +190,7 @@ func TestStartExecution_HubSpokeRetry_HubFailed_HubReceivesUpdates(t *testing.T)
 // TestStartExecution_HubSpokeNonRetry_UsesNormalPath verifies that a normal
 // (non-retry) hub-and-spoke execution does NOT use the retry path even when
 // copyMode is "hub-spoke".  When retryParams is nil, the standard
-// runHubSpokeWithProgress is used, which treats dstHosts[0] as the hub.
+// runSpokePullWithProgress is used, which treats dstHosts[0] as the hub.
 func TestStartExecution_HubSpokeNonRetry_UsesNormalPath(t *testing.T) {
 	if _, err := exec.LookPath("ssh-keygen"); err != nil {
 		t.Skip("ssh-keygen not found")

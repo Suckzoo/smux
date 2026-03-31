@@ -59,12 +59,20 @@ SSH windows on demand.
 ```
 cmd/smux/main.go          — entry point, flag parsing, run modes
 internal/config/          — YAML config parsing, host resolution
-  config.go               — Config struct, cluster/host types, loader
+  config.go               — Config struct, cluster/host/subgroup types, IP resolution, loader
   sshconfig.go            — ~/.ssh/config reader (kevinburke/ssh_config)
 internal/tui/             — bubbletea TUI
   model.go                — Model, Update, View; host selection logic
   phase.go                — Phase state machine (Browsing/Selecting/Confirming/Launching/QuitConfirming)
-  tree.go                 — TreeNode and BuildFlatList for cluster tree rendering
+  tree.go                 — TreeNode (cluster/subgroup/host) and BuildFlatList for tree rendering
+  distribute.go           — Distribute-file wizard (steps, views, key handlers)
+  execute.go              — Transfer execution (spoke-pull, progress, retry)
+internal/executor/        — file distribution backends
+  executor.go             — direct-parallel SCP transfers
+  hubspoke.go             — hub-spoke PushToHub
+  spokepull.go            — spoke-pull fan-out (spoke pulls from hub via private IP)
+  resolve_ip.go           — CIDR-based private IP resolution via `ip addr`
+internal/sshkeys/         — temporary SSH keypair lifecycle
 internal/tmux/            — tmux command wrappers
   tmux.go                 — window creation, keybindings, mouse mode, window management
   pane.go                 — PaneSession lifecycle, WatchPaneExit

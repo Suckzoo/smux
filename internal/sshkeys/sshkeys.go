@@ -217,6 +217,15 @@ func (kp *TempKeyPair) DeleteKeyFiles() error {
 	return nil
 }
 
+// PrivateKeyContent reads and returns the private key file content as a string.
+func (kp *TempKeyPair) PrivateKeyContent() (string, error) {
+	data, err := os.ReadFile(kp.PrivateKeyPath)
+	if err != nil {
+		return "", fmt.Errorf("read private key: %w", err)
+	}
+	return string(data), nil
+}
+
 // shellescape wraps s in single quotes and escapes any embedded single
 // quotes with the classic '\'' idiom. This is safe for use in POSIX shell
 // commands when the value may contain spaces or special characters.

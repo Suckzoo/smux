@@ -181,7 +181,7 @@ func New(cfg *config.Config, opts ...ModelOption) Model {
 	m := Model{
 		cfg:      cfg,
 		clusters: clusterNames,
-		tree:     NewTreeState(clusterNames), // all clusters start expanded
+		tree:     NewTreeStateFromConfig(cfg), // all clusters and subgroups start expanded
 		state: SelectionState{
 			Phase:    BrowsingPhase{},
 			Selected: make(map[string]bool),
@@ -820,8 +820,8 @@ func (m Model) handleEnter() (Model, tea.Cmd) {
 	return m, tea.Quit
 }
 
-// toggleExpand expands or collapses the cluster node under the cursor via
-// TreeState.Toggle. Has no effect when the cursor is on a host node.
+// toggleExpand expands or collapses the cluster or subgroup node under the
+// cursor via TreeState.Toggle. Has no effect when the cursor is on a host node.
 func (m *Model) toggleExpand() {
 	if m.view.Cursor >= len(m.flatNodes) {
 		return
@@ -831,11 +831,15 @@ func (m *Model) toggleExpand() {
 		m.tree.Toggle(n.ClusterName)
 		m.rebuildFlat()
 		m.clampViewport()
+	} else if n.IsSubgroup() {
+		m.tree.Toggle(subgroupKey(n.ClusterName, n.SubgroupName))
+		m.rebuildFlat()
+		m.clampViewport()
 	}
 }
 
-// collapseOrMoveUp collapses the cluster at the cursor when it is expanded,
-// otherwise moves the cursor up by one row.
+// collapseOrMoveUp collapses the cluster or subgroup at the cursor when it is
+// expanded, otherwise moves the cursor up by one row.
 func (m *Model) collapseOrMoveUp() {
 	if m.view.Cursor >= len(m.flatNodes) {
 		return
@@ -847,6 +851,12 @@ func (m *Model) collapseOrMoveUp() {
 		m.clampViewport()
 		return
 	}
+	if n.IsSubgroup() && m.tree.IsExpanded(subgroupKey(n.ClusterName, n.SubgroupName)) {
+		m.tree.SetExpanded(subgroupKey(n.ClusterName, n.SubgroupName), false)
+		m.rebuildFlat()
+		m.clampViewport()
+		return
+	}
 	if m.view.Cursor > 0 {
 		m.view.Cursor--
 		m.clampViewport()
@@ -854,7 +864,7 @@ func (m *Model) collapseOrMoveUp() {
 }
 
 // toggleSelect selects/deselects the host under the cursor, or all hosts in
-// the cluster when the cursor is on a cluster node.
+// the cluster/subgroup when the cursor is on a cluster or subgroup node.
 func (m *Model) toggleSelect() {
 	if m.view.Cursor >= len(m.flatNodes) {
 		return
@@ -863,13 +873,35 @@ func (m *Model) toggleSelect() {
 	if n.IsCluster() {
 		allSelected := m.clusterAllSelected(n.ClusterName)
 		cluster := m.cfg.Clusters[n.ClusterName]
-		for _, h := range cluster.Hosts {
-			r := h.Resolve(n.ClusterName, cluster.Defaults)
+		hosts := collectAllClusterHosts(n.ClusterName, cluster)
+		for _, r := range hosts {
 			k := hostKey(r)
 			if allSelected {
 				delete(m.state.Selected, k)
 			} else {
 				m.state.Selected[k] = true
+			}
+		}
+	} else if n.IsSubgroup() {
+		cluster := m.cfg.Clusters[n.ClusterName]
+		sg, ok := cluster.Subgroups[n.SubgroupName]
+		if ok {
+			allSelected := true
+			var hosts []config.ResolvedHost
+			for i, h := range sg.Hosts {
+				r := h.ResolveInSubgroup(n.ClusterName, cluster.Defaults, n.SubgroupName, sg, i)
+				hosts = append(hosts, r)
+				if !m.state.Selected[hostKey(r)] {
+					allSelected = false
+				}
+			}
+			for _, r := range hosts {
+				k := hostKey(r)
+				if allSelected {
+					delete(m.state.Selected, k)
+				} else {
+					m.state.Selected[k] = true
+				}
 			}
 		}
 	} else if n.Host != nil {
@@ -888,13 +920,29 @@ func (m *Model) clusterAllSelected(clusterName string) bool {
 	if !ok {
 		return false
 	}
-	for _, h := range cluster.Hosts {
-		r := h.Resolve(clusterName, cluster.Defaults)
+	hosts := collectAllClusterHosts(clusterName, cluster)
+	for _, r := range hosts {
 		if !m.state.Selected[hostKey(r)] {
 			return false
 		}
 	}
-	return len(cluster.Hosts) > 0
+	return len(hosts) > 0
+}
+
+// collectAllClusterHosts returns all resolved hosts in a cluster, whether flat
+// or in subgroups.
+func collectAllClusterHosts(clusterName string, cluster config.ClusterConfig) []config.ResolvedHost {
+	var hosts []config.ResolvedHost
+	for _, h := range cluster.Hosts {
+		hosts = append(hosts, h.Resolve(clusterName, cluster.Defaults))
+	}
+	for _, sgName := range cluster.SubgroupNames() {
+		sg := cluster.Subgroups[sgName]
+		for i, h := range sg.Hosts {
+			hosts = append(hosts, h.ResolveInSubgroup(clusterName, cluster.Defaults, sgName, sg, i))
+		}
+	}
+	return hosts
 }
 
 // selectedHosts returns all currently selected hosts in cluster-sorted order.
@@ -911,12 +959,11 @@ func (m *Model) selectedHosts() []config.ResolvedHost {
 	seenByHost := make(map[string]bool)
 	for _, name := range m.clusters {
 		cluster := m.cfg.Clusters[name]
-		for _, h := range cluster.Hosts {
-			r := h.Resolve(name, cluster.Defaults)
-			k := hostKey(r) // cluster/hostName key — used to look up selection state
+		allHosts := collectAllClusterHosts(name, cluster)
+		for _, r := range allHosts {
+			k := hostKey(r)
 			if m.state.Selected[k] && !seenByHost[r.Host] {
 				seenByHost[r.Host] = true
-				// Enrich with the full list of clusters that contain this alias.
 				r.ClusterNames = m.cfg.AllClustersForHost(r.Host)
 				hosts = append(hosts, r)
 			}
@@ -1341,15 +1388,29 @@ func (m Model) renderList() []string {
 				check = "[✓]"
 			}
 			cluster := m.cfg.Clusters[n.ClusterName]
-			count := len(cluster.Hosts)
+			count := len(collectAllClusterHosts(n.ClusterName, cluster))
 			text = fmt.Sprintf("%s%s %s (%d hosts)", arrow, check, n.ClusterName, count)
+		} else if n.IsSubgroup() {
+			isCluster = true // reuse cluster styling for subgroup headers
+			arrow := "  ▶ "
+			sgKey := subgroupKey(n.ClusterName, n.SubgroupName)
+			if m.tree.IsExpanded(sgKey) {
+				arrow = "  ▼ "
+			}
+			cluster := m.cfg.Clusters[n.ClusterName]
+			sg := cluster.Subgroups[n.SubgroupName]
+			text = fmt.Sprintf("%s%s (%d hosts)", arrow, n.SubgroupName, len(sg.Hosts))
 		} else if n.Host != nil {
 			k := hostKey(*n.Host)
 			isSelected = m.state.Selected[k]
 			isDirty = m.dirtyHosts[n.Host.Host]
-			check := "  [ ] "
+			indent := "  "
+			if n.SubgroupName != "" {
+				indent = "    "
+			}
+			check := indent + "[ ] "
 			if isSelected {
-				check = "  [✓] "
+				check = indent + "[✓] "
 			}
 			text = check + n.Host.DisplayName
 			// Prepend the warning glyph so it is always visible, including

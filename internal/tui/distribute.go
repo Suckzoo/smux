@@ -406,14 +406,14 @@ func NewDistributeModel(cfg *config.Config, width, height int) DistributeModel {
 		step:   DistributeStepSourceSelect,
 
 		// Step 0: source-origin tree; cursor starts at Local (index 0).
-		sourceTree:         NewTreeState(cfg.ClusterNames()),
+		sourceTree:         NewTreeStateFromConfig(cfg),
 		sourceOriginCursor: 0,
 		sourceViewport:     newSourceViewport(width, height),
 		sourceFilterInput:  newDestFilterInput(),
 
 		// Step 2: initialise destination host list with tree state.
 		destHostItems:    cfg.AllResolvedHosts(),
-		destTree:         NewTreeState(cfg.ClusterNames()),
+		destTree:         NewTreeStateFromConfig(cfg),
 
 		// Step 4: destination path text input.
 		destPathInput: newDestPathInput(),
@@ -520,11 +520,11 @@ func NewRetryDistributeModel(cfg *config.Config, width, height int, params execu
 		copyMode:    params.CopyMode,
 		destPath:    params.DestPath,
 
-		sourceTree:         NewTreeState(cfg.ClusterNames()),
+		sourceTree:         NewTreeStateFromConfig(cfg),
 		sourceViewport:     newSourceViewport(width, height),
 		sourceFilterInput:  newDestFilterInput(),
 		destHostItems:      cfg.AllResolvedHosts(),
-		destTree:           NewTreeState(cfg.ClusterNames()),
+		destTree:           NewTreeStateFromConfig(cfg),
 		destHostSelected:   make(map[string]bool),
 		destViewport:       newDestViewport(width, height),
 		destFilterInput:    newDestFilterInput(),
@@ -724,10 +724,15 @@ func (m DistributeModel) handleKey(msg tea.KeyMsg) (DistributeModel, tea.Cmd) {
 
 	switch msg.String() {
 	case "q":
-		// q cancels the entire wizard flow and exits smux.
-		m.cancelled = true
+		// q returns to the main host list from the distribute wizard.
+		// During an active transfer (started but not yet complete), ignore q
+		// so the user cannot accidentally abandon in-flight transfers.
+		if m.step == DistributeStepExecute && m.executeStarted && !m.executeDone {
+			return m, nil
+		}
+		m.exitToMain = true
 		m.done = true
-		return m, tea.Quit
+		return m, nil
 
 	case "ctrl+c":
 		// Ctrl+C also exits smux from anywhere in the wizard.
@@ -848,6 +853,10 @@ func (m DistributeModel) handleSourceOriginKey(msg tea.KeyMsg) (DistributeModel,
 				m.sourceTree.Toggle(n.ClusterName)
 				m.rebuildSourceFlat()
 				m.clampSourceViewport()
+			} else if n.IsSubgroup() {
+				m.sourceTree.Toggle(subgroupKey(n.ClusterName, n.SubgroupName))
+				m.rebuildSourceFlat()
+				m.clampSourceViewport()
 			}
 		}
 	case "left", "h":
@@ -855,6 +864,10 @@ func (m DistributeModel) handleSourceOriginKey(msg tea.KeyMsg) (DistributeModel,
 			n := m.sourceFlatNodes[m.sourceOriginCursor]
 			if n.IsCluster() && m.sourceTree.IsExpanded(n.ClusterName) {
 				m.sourceTree.SetExpanded(n.ClusterName, false)
+				m.rebuildSourceFlat()
+				m.clampSourceViewport()
+			} else if n.IsSubgroup() && m.sourceTree.IsExpanded(subgroupKey(n.ClusterName, n.SubgroupName)) {
+				m.sourceTree.SetExpanded(subgroupKey(n.ClusterName, n.SubgroupName), false)
 				m.rebuildSourceFlat()
 				m.clampSourceViewport()
 			} else if m.sourceOriginCursor > 0 {
@@ -874,6 +887,13 @@ func (m DistributeModel) handleSourceOriginKey(msg tea.KeyMsg) (DistributeModel,
 		if n.IsCluster() {
 			// Enter on a cluster header toggles expand/collapse.
 			m.sourceTree.Toggle(n.ClusterName)
+			m.rebuildSourceFlat()
+			m.clampSourceViewport()
+			return m, nil
+		}
+		if n.IsSubgroup() {
+			// Enter on a subgroup header toggles expand/collapse.
+			m.sourceTree.Toggle(subgroupKey(n.ClusterName, n.SubgroupName))
 			m.rebuildSourceFlat()
 			m.clampSourceViewport()
 			return m, nil
@@ -1002,7 +1022,7 @@ func (m *DistributeModel) clampSourceViewport() {
 	ClampViewport(&m.sourceViewport, m.sourceOriginCursor, len(m.sourceFlatNodes))
 }
 
-// destToggleExpand toggles expansion of the cluster under the cursor.
+// destToggleExpand toggles expansion of the cluster or subgroup under the cursor.
 func (m *DistributeModel) destToggleExpand() {
 	if m.destHostCursor >= len(m.destFlatNodes) {
 		return
@@ -1012,11 +1032,15 @@ func (m *DistributeModel) destToggleExpand() {
 		m.destTree.Toggle(n.ClusterName)
 		m.rebuildDestFlat()
 		m.clampDestViewport()
+	} else if n.IsSubgroup() {
+		m.destTree.Toggle(subgroupKey(n.ClusterName, n.SubgroupName))
+		m.rebuildDestFlat()
+		m.clampDestViewport()
 	}
 }
 
-// destCollapseOrMoveUp collapses the cluster at the cursor when it is expanded,
-// or moves the cursor up to the parent cluster header when on a host node.
+// destCollapseOrMoveUp collapses the cluster or subgroup at the cursor when
+// it is expanded, or moves the cursor up.
 func (m *DistributeModel) destCollapseOrMoveUp() {
 	if m.destHostCursor >= len(m.destFlatNodes) {
 		return
@@ -1028,7 +1052,13 @@ func (m *DistributeModel) destCollapseOrMoveUp() {
 		m.clampDestViewport()
 		return
 	}
-	// On a host node or collapsed cluster: move cursor up.
+	if n.IsSubgroup() && m.destTree.IsExpanded(subgroupKey(n.ClusterName, n.SubgroupName)) {
+		m.destTree.SetExpanded(subgroupKey(n.ClusterName, n.SubgroupName), false)
+		m.rebuildDestFlat()
+		m.clampDestViewport()
+		return
+	}
+	// On a host node or collapsed node: move cursor up.
 	if m.destHostCursor > 0 {
 		m.destHostCursor--
 		m.clampDestViewport()
@@ -1036,8 +1066,8 @@ func (m *DistributeModel) destCollapseOrMoveUp() {
 }
 
 // destToggleSelect toggles selection for the node under the cursor.
-// For a host node, toggles that host. For a cluster node, toggles all hosts
-// in that cluster.
+// For a host node, toggles that host. For a cluster or subgroup node,
+// toggles all hosts in that cluster or subgroup.
 func (m *DistributeModel) destToggleSelect() {
 	if m.destHostCursor >= len(m.destFlatNodes) {
 		return
@@ -1050,20 +1080,41 @@ func (m *DistributeModel) destToggleSelect() {
 		} else {
 			m.destHostSelected[key] = true
 		}
-	} else if n.IsCluster() {
-		// Toggle all hosts in this cluster: if all are selected, deselect all;
-		// otherwise select all.
+	} else if n.IsSubgroup() {
+		// Toggle all hosts in this subgroup.
 		cluster := m.cfg.Clusters[n.ClusterName]
+		sg, ok := cluster.Subgroups[n.SubgroupName]
+		if !ok {
+			return
+		}
 		allSelected := true
-		for _, h := range cluster.Hosts {
-			r := h.Resolve(n.ClusterName, cluster.Defaults)
+		for i, h := range sg.Hosts {
+			r := h.ResolveInSubgroup(n.ClusterName, cluster.Defaults, n.SubgroupName, sg, i)
 			if !m.destHostSelected[r.Host] {
 				allSelected = false
 				break
 			}
 		}
-		for _, h := range cluster.Hosts {
-			r := h.Resolve(n.ClusterName, cluster.Defaults)
+		for i, h := range sg.Hosts {
+			r := h.ResolveInSubgroup(n.ClusterName, cluster.Defaults, n.SubgroupName, sg, i)
+			if allSelected {
+				delete(m.destHostSelected, r.Host)
+			} else {
+				m.destHostSelected[r.Host] = true
+			}
+		}
+	} else if n.IsCluster() {
+		// Toggle all hosts in this cluster (flat or all subgroups).
+		cluster := m.cfg.Clusters[n.ClusterName]
+		hosts := m.collectClusterHosts(n.ClusterName, cluster)
+		allSelected := true
+		for _, r := range hosts {
+			if !m.destHostSelected[r.Host] {
+				allSelected = false
+				break
+			}
+		}
+		for _, r := range hosts {
 			if allSelected {
 				delete(m.destHostSelected, r.Host)
 			} else {
@@ -1071,6 +1122,22 @@ func (m *DistributeModel) destToggleSelect() {
 			}
 		}
 	}
+}
+
+// collectClusterHosts returns all resolved hosts in a cluster, whether flat
+// or in subgroups.
+func (m *DistributeModel) collectClusterHosts(clusterName string, cluster config.ClusterConfig) []config.ResolvedHost {
+	var hosts []config.ResolvedHost
+	for _, h := range cluster.Hosts {
+		hosts = append(hosts, h.Resolve(clusterName, cluster.Defaults))
+	}
+	for _, sgName := range cluster.SubgroupNames() {
+		sg := cluster.Subgroups[sgName]
+		for i, h := range sg.Hosts {
+			hosts = append(hosts, h.ResolveInSubgroup(clusterName, cluster.Defaults, sgName, sg, i))
+		}
+	}
+	return hosts
 }
 
 // handleDestHostsKey handles navigation and selection in the destination host
@@ -1271,8 +1338,9 @@ func (m DistributeModel) handleConfirmKey(msg tea.KeyMsg) (DistributeModel, tea.
 // Enter starts the transfer (first press) or opens the error overlay for the
 // selected failed host (when execution is done).  j/k move the cursor through
 // the destination host list.  'r' retries failed hosts after execution
-// completes.  Esc and q/Ctrl+C are consumed by the global handleKey
-// dispatcher and never arrive here.
+// completes.  Ctrl+C is consumed by the global handleKey dispatcher.
+// q is also consumed by the global handler (returns to host list) except
+// during active transfers where it is ignored.
 func (m DistributeModel) handleExecuteKey(msg tea.KeyMsg) (DistributeModel, tea.Cmd) {
 	switch msg.String() {
 	case "enter":
@@ -1558,8 +1626,23 @@ func (m DistributeModel) renderSourceSelectStep() string {
 				} else {
 					lines[i] = clusterStyle.Render("  " + text)
 				}
+			case n.IsSubgroup():
+				arrow := "▸"
+				if m.sourceTree.IsExpanded(subgroupKey(n.ClusterName, n.SubgroupName)) {
+					arrow = "▾"
+				}
+				text := fmt.Sprintf("  %s %s", arrow, n.SubgroupName)
+				if isCursor {
+					lines[i] = cursorStyle.Render("▶ " + text)
+				} else {
+					lines[i] = clusterStyle.Render("  " + text)
+				}
 			case n.IsHost() && n.Host != nil:
-				text := fmt.Sprintf("    %s", n.Host.DisplayName)
+				indent := "    "
+				if n.SubgroupName != "" {
+					indent = "      "
+				}
+				text := fmt.Sprintf("%s%s", indent, n.Host.DisplayName)
 				if isCursor {
 					lines[i] = cursorStyle.Render("▶" + text)
 				} else {
@@ -1648,13 +1731,28 @@ func (m DistributeModel) renderDestHostsStep() string {
 				} else {
 					lines[i] = clusterStyle.Render("  " + text)
 				}
+			} else if n.IsSubgroup() {
+				arrow := "▸"
+				if m.destTree.IsExpanded(subgroupKey(n.ClusterName, n.SubgroupName)) {
+					arrow = "▾"
+				}
+				text := fmt.Sprintf("  %s %s", arrow, n.SubgroupName)
+				if isCursor {
+					lines[i] = cursorStyle.Render("▶ " + text)
+				} else {
+					lines[i] = clusterStyle.Render("  " + text)
+				}
 			} else if n.IsHost() && n.Host != nil {
 				isSelected := m.destHostSelected[n.Host.Host]
 				check := "[ ]"
 				if isSelected {
 					check = "[✓]"
 				}
-				text := fmt.Sprintf("  %s %s", check, n.Host.DisplayName)
+				indent := "  "
+				if n.SubgroupName != "" {
+					indent = "    "
+				}
+				text := fmt.Sprintf("%s%s %s", indent, check, n.Host.DisplayName)
 				switch {
 				case isCursor && isSelected:
 					lines[i] = cursorStyle.Render("▶ " + text)

@@ -527,9 +527,10 @@ exit 0
 // InternalIP tests — Task 2
 // ---------------------------------------------------------------------------
 
-// TestBuildSCPArgs_SrcUsesInternalIP verifies that buildSCPArgs uses
-// src.InternalIP as the source address when InternalIP is set (remote source).
-func TestBuildSCPArgs_SrcUsesInternalIP(t *testing.T) {
+// TestBuildSCPArgs_SrcUsesHost verifies that buildSCPArgs uses src.Host
+// (the SSH alias) as the source address, even when InternalIP is set.
+// EffectiveAddress() always returns Host; internal IPs are for spoke-pull only.
+func TestBuildSCPArgs_SrcUsesHost(t *testing.T) {
 	kp := &sshkeys.TempKeyPair{PrivateKeyPath: "/tmp/key"}
 	src := config.ResolvedHost{
 		Host:       "src-01.example.com",
@@ -539,17 +540,18 @@ func TestBuildSCPArgs_SrcUsesInternalIP(t *testing.T) {
 	dst := config.ResolvedHost{Host: "dst-01.example.com"}
 	args := buildSCPArgs(src, "/src/file.txt", dst, "/dst/file.txt", kp)
 	argsStr := strings.Join(args, " ")
-	if !strings.Contains(argsStr, "ubuntu@10.0.0.2:/src/file.txt") {
-		t.Errorf("expected internal IP in src args, got: %s", argsStr)
+	if !strings.Contains(argsStr, "ubuntu@src-01.example.com:/src/file.txt") {
+		t.Errorf("expected Host alias in src args, got: %s", argsStr)
 	}
-	if strings.Contains(argsStr, "src-01.example.com") {
-		t.Errorf("public hostname should not appear when src InternalIP is set, got: %s", argsStr)
+	if strings.Contains(argsStr, "10.0.0.2") {
+		t.Errorf("InternalIP should not appear in local SCP args, got: %s", argsStr)
 	}
 }
 
-// TestBuildSCPArgs_DestUsesInternalIP verifies that buildSCPArgs uses
-// dst.InternalIP as the destination address when InternalIP is set.
-func TestBuildSCPArgs_DestUsesInternalIP(t *testing.T) {
+// TestBuildSCPArgs_DestUsesHost verifies that buildSCPArgs uses dst.Host
+// (the SSH alias) as the destination address, even when InternalIP is set.
+// EffectiveAddress() always returns Host; internal IPs are for spoke-pull only.
+func TestBuildSCPArgs_DestUsesHost(t *testing.T) {
 	kp := &sshkeys.TempKeyPair{PrivateKeyPath: "/tmp/key"}
 	dst := config.ResolvedHost{
 		Host:       "spoke-01.example.com",
@@ -558,11 +560,11 @@ func TestBuildSCPArgs_DestUsesInternalIP(t *testing.T) {
 	}
 	args := buildSCPArgs(config.ResolvedHost{}, "/src/file.txt", dst, "/dst/file.txt", kp)
 	argsStr := strings.Join(args, " ")
-	if !strings.Contains(argsStr, "ubuntu@10.0.0.1:/dst/file.txt") {
-		t.Errorf("expected internal IP in args, got: %s", argsStr)
+	if !strings.Contains(argsStr, "ubuntu@spoke-01.example.com:/dst/file.txt") {
+		t.Errorf("expected Host alias in dest args, got: %s", argsStr)
 	}
-	if strings.Contains(argsStr, "spoke-01.example.com") {
-		t.Errorf("public hostname should not appear when InternalIP is set, got: %s", argsStr)
+	if strings.Contains(argsStr, "10.0.0.1") {
+		t.Errorf("InternalIP should not appear in local SCP args, got: %s", argsStr)
 	}
 }
 

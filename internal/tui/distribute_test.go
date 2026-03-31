@@ -157,8 +157,8 @@ func TestDistributeEscFromFirstStepSignalsExitToMain(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestDistributeQKeyCancelsAndQuits verifies that pressing 'q' anywhere in the
-// wizard sets cancelled = true and issues tea.Quit.
-func TestDistributeQKeyCancelsAndQuits(t *testing.T) {
+// wizard sets exitToMain = true and does NOT issue tea.Quit (returns to host list).
+func TestDistributeQKeyReturnsToHostList(t *testing.T) {
 	for _, step := range []DistributeStep{
 		DistributeStepSourceSelect,
 		DistributeStepFileBrowse,
@@ -177,11 +177,11 @@ func TestDistributeQKeyCancelsAndQuits(t *testing.T) {
 		if !m.IsDone() {
 			t.Errorf("step %d: pressing 'q' should mark wizard as done", step)
 		}
-		if !m.IsCancelled() {
-			t.Errorf("step %d: pressing 'q' should set cancelled = true", step)
+		if !m.IsExitToMain() {
+			t.Errorf("step %d: pressing 'q' should set exitToMain = true", step)
 		}
-		if !isQuitCmd(cmd) {
-			t.Errorf("step %d: pressing 'q' should issue tea.Quit", step)
+		if isQuitCmd(cmd) {
+			t.Errorf("step %d: pressing 'q' should not issue tea.Quit", step)
 		}
 	}
 }
@@ -324,16 +324,22 @@ func TestDistributeWizardEscFromFirstStepReturnsToNormalTUI(t *testing.T) {
 	}
 }
 
-// TestDistributeWizardQKeyQuitsSmux verifies that pressing 'q' inside the
-// wizard exits smux entirely (issues tea.Quit and marks the parent done).
-func TestDistributeWizardQKeyQuitsSmux(t *testing.T) {
+// TestDistributeWizardQKeyReturnsToHostList verifies that pressing 'q' inside
+// the wizard returns to the main host list (not tea.Quit).
+func TestDistributeWizardQKeyReturnsToHostList(t *testing.T) {
 	m := withWindowSize(New(minimalConfig()), 80, 24)
 	m, _ = sendKey(m, "ctrl+d") // enter wizard
 
 	m, cmd := sendKey(m, "q")
 
-	if !isQuitCmd(cmd) {
-		t.Error("pressing 'q' inside the wizard should issue tea.Quit")
+	if m.distributeWizard != nil {
+		t.Error("after 'q', distributeWizard should be nil (back to host list)")
+	}
+	if m.Done() {
+		t.Error("returning to host list should not mark the main model as done")
+	}
+	if isQuitCmd(cmd) {
+		t.Error("pressing 'q' inside the wizard should not issue tea.Quit")
 	}
 }
 
@@ -2095,19 +2101,19 @@ func TestRetryConfirmEscExitsToMain(t *testing.T) {
 	}
 }
 
-// TestRetryConfirmQKeyQuits verifies that pressing 'q' on the retry-confirm
-// step cancels and issues tea.Quit (same global behaviour as all other steps).
-func TestRetryConfirmQKeyQuits(t *testing.T) {
+// TestRetryConfirmQKeyReturnsToHostList verifies that pressing 'q' on the
+// retry-confirm step returns to the host list (exitToMain, no tea.Quit).
+func TestRetryConfirmQKeyReturnsToHostList(t *testing.T) {
 	params := makeRetryParams("h1.example.com")
 	m := NewRetryDistributeModel(minimalConfig(), 80, 24, params)
 
 	m, cmd := sendDistributeKey(m, "q")
 
-	if !m.IsCancelled() {
-		t.Error("pressing 'q' on retry-confirm should set cancelled = true")
+	if !m.IsExitToMain() {
+		t.Error("pressing 'q' on retry-confirm should set exitToMain = true")
 	}
-	if !isQuitCmd(cmd) {
-		t.Error("pressing 'q' on retry-confirm should issue tea.Quit")
+	if isQuitCmd(cmd) {
+		t.Error("pressing 'q' on retry-confirm should not issue tea.Quit")
 	}
 }
 

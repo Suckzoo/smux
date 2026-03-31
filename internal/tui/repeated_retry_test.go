@@ -318,9 +318,9 @@ func TestRepeatedRetry_EscFromRetryConfirmExitsLoop(t *testing.T) {
 	}
 }
 
-// TestRepeatedRetry_QFromRetryConfirmQuitsSmux verifies that pressing 'q' on
-// the retry-confirm step of a repeated retry issues tea.Quit (exits smux).
-func TestRepeatedRetry_QFromRetryConfirmQuitsSmux(t *testing.T) {
+// TestRepeatedRetry_QFromRetryConfirmReturnsToHostList verifies that pressing
+// 'q' on the retry-confirm step of a repeated retry returns to the host list.
+func TestRepeatedRetry_QFromRetryConfirmReturnsToHostList(t *testing.T) {
 	failed := []config.ResolvedHost{
 		{Host: "h1.example.com", DisplayName: "h1"},
 	}
@@ -333,14 +333,14 @@ func TestRepeatedRetry_QFromRetryConfirmQuitsSmux(t *testing.T) {
 		t.Fatalf("expected DistributeStepRetryConfirm, got %d", m2.step)
 	}
 
-	// Press 'q' to quit smux.
+	// Press 'q' to return to host list.
 	m3, cmd := sendDistributeKey(m2, "q")
 
-	if !m3.IsCancelled() {
-		t.Error("pressing 'q' on retry-confirm should set cancelled = true")
+	if !m3.IsExitToMain() {
+		t.Error("pressing 'q' on retry-confirm should set exitToMain = true")
 	}
-	if !isQuitCmd(cmd) {
-		t.Error("pressing 'q' on retry-confirm should issue tea.Quit")
+	if isQuitCmd(cmd) {
+		t.Error("pressing 'q' on retry-confirm should not issue tea.Quit")
 	}
 }
 

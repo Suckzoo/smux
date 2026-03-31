@@ -778,6 +778,28 @@ func TestBuildHubSCPCommand_NoUser(t *testing.T) {
 	}
 }
 
+// TestBuildHubSCPCommand_UsesInternalIP verifies that when the spoke has an
+// InternalIP, the scp destination uses the InternalIP instead of the Host alias.
+// This is critical for hub-to-spoke transfers where the hub cannot resolve
+// local SSH aliases.
+func TestBuildHubSCPCommand_UsesInternalIP(t *testing.T) {
+	hubKP := fakeHubKeyPair("/hub-dir", "/hub-dir/id_ed25519")
+	spoke := config.ResolvedHost{
+		Host:       "my-alias",
+		InternalIP: "10.0.0.42",
+		User:       "root",
+	}
+
+	cmd := buildHubSCPCommand("/hub/file.txt", spoke, "/dest/file.txt", hubKP)
+
+	if !strings.Contains(cmd, "root@10.0.0.42:/dest/file.txt") {
+		t.Errorf("expected InternalIP in destination; got:\n%s", cmd)
+	}
+	if strings.Contains(cmd, "my-alias") {
+		t.Errorf("should not use SSH alias when InternalIP is set; got:\n%s", cmd)
+	}
+}
+
 // TestBuildHubSCPCommand_NoPortWhenZero verifies that the -P flag is omitted
 // when the spoke port is zero (default port 22).
 func TestBuildHubSCPCommand_NoPortWhenZero(t *testing.T) {

@@ -247,17 +247,18 @@ func TestBuildSFTPArgs_Minimal(t *testing.T) {
 	}
 }
 
-// TestBuildSSHArgsForHost_UsesInternalIP verifies that BuildSSHArgsForHost
-// uses host.InternalIP as the target address when InternalIP is set.
-func TestBuildSSHArgsForHost_UsesInternalIP(t *testing.T) {
+// TestBuildSSHArgsForHost_UsesHost verifies that BuildSSHArgsForHost uses
+// host.Host (the SSH alias) as the target address, even when InternalIP is set.
+// EffectiveAddress() always returns Host; internal IPs are for spoke-pull only.
+func TestBuildSSHArgsForHost_UsesHost(t *testing.T) {
 	host := config.ResolvedHost{
 		Host:       "spoke-01.example.com",
 		InternalIP: "10.0.0.1",
 	}
 	args := BuildSSHArgsForHost(host)
 	last := args[len(args)-1]
-	if last != "10.0.0.1" {
-		t.Errorf("BuildSSHArgsForHost: last arg (host) = %q, want %q", last, "10.0.0.1")
+	if last != "spoke-01.example.com" {
+		t.Errorf("BuildSSHArgsForHost: last arg (host) = %q, want %q", last, "spoke-01.example.com")
 	}
 }
 
